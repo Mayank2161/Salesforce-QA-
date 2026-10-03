@@ -1,0 +1,20 @@
+node_modules/
+dist/
+*.log
+
+# Secrets
+.env
+
+# Local org/persona config (may contain client org URLs and usernames)
+config/orgs.json
+
+# Saved Playwright login sessions: these are effectively live credentials
+auth/*
+!auth/.gitkeep
+
+# Run evidence (screenshots, logs, results)
+runs/*
+!runs/.gitkeep
+
+# Reports, bugs and screenshots (client data)
+qa/

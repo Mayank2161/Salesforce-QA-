@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="Salesforce QA Agent">
+  <defs>
+    <linearGradient id="sfqa-bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1b96ff"/>
+      <stop offset="1" stop-color="#6b3fe6"/>
+    </linearGradient>
+    <linearGradient id="sfqa-shield" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity=".32"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity=".08"/>
+    </linearGradient>
+  </defs>
+  <rect width="128" height="128" rx="30" fill="url(#sfqa-bg)"/>
+  <path d="M62 24 L94 35 V61 C94 82 80 97 62 104 C44 97 30 82 30 61 V35 Z"
+        fill="url(#sfqa-shield)" stroke="#fff" stroke-width="6.5" stroke-linejoin="round"/>
+  <path d="M46 63 L57.5 74.5 L79 52" fill="none" stroke="#fff" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M103 15 L106.6 24.4 L116 28 L106.6 31.6 L103 41 L99.4 31.6 L90 28 L99.4 24.4 Z" fill="#ffd84d"/>
+  <circle cx="113" cy="45" r="3.2" fill="#ffd84d"/>
+</svg>

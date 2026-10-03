@@ -1,0 +1,14 @@
+{
+  "orgs": [
+    {
+      "id": "acme-uat",
+      "name": "ACME - UAT",
+      "loginUrl": "https://acme--uat.sandbox.my.salesforce.com",
+      "instanceUrl": "https://acme--uat.sandbox.lightning.force.com",
+      "personas": [
+        { "id": "sales-user", "name": "Sales User", "username": "sales.user@acme.com.uat", "profile": "RMS Sales" },
+        { "id": "sales-manager", "name": "Sales Manager", "username": "sales.manager@acme.com.uat", "profile": "RMS Sales Manager" }
+      ]
+    }
+  ]
+}

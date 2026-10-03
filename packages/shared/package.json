@@ -1,0 +1,17 @@
+{
+  "name": "@sfqa/shared",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Types and schemas shared by the server and the Chrome extension.",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --test --test-timeout=15000 \"test/**/*.test.ts\""
+  },
+  "dependencies": {
+    "zod": "^4.6.5"
+  }
+}

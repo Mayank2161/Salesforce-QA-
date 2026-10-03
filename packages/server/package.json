@@ -1,0 +1,30 @@
+{
+  "name": "@sfqa/server",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local agent server: API, run orchestration, Playwright runner, evidence store.",
+  "type": "module",
+  "scripts": {
+    "start": "node --env-file-if-exists=../../.env src/main.ts",
+    "dev": "node --env-file-if-exists=../../.env src/main.ts",
+    "dev:watch": "node --env-file-if-exists=../../.env --watch src/main.ts",
+    "connect": "node --env-file-if-exists=../../.env src/cli/connect.ts",
+    "connections": "node --env-file-if-exists=../../.env src/cli/connections.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test --test-timeout=15000 \"test/**/*.test.ts\""
+  },
+  "dependencies": {
+    "@fastify/websocket": "^11.3.1",
+    "@modelcontextprotocol/sdk": "^1.31.0",
+    "@playwright/mcp": "0.0.83",
+    "@sfqa/shared": "0.1.0",
+    "fastify": "^5.12.5",
+    "playwright": "^1.63.0",
+    "read-excel-file": "^9.3.10",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@types/ws": "^8.18.2",
+    "fflate": "^0.8.3"
+  }
+}
