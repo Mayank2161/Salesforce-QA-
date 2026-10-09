@@ -1,5 +1,6 @@
 import type {
-  NewPersona, Org, OrgConnection, OrgsConfig, ParsedSuite, Persona, Run, RunEvent, RunRequest, SalesforceUser, StartSuiteRequest, Suite,
+  NewPersona, Org, OrgConnection, OrgsConfig, ParsedSuite, Persona, Review, Run, RunEvent, RunRequest, SalesforceUser, StartReviewRequest,
+  StartSuiteRequest, Suite,
 } from "@sfqa/shared";
 
 // An org's admin connection, plus who connected it.
@@ -23,6 +24,8 @@ export type BgRequest =
   | { type: "startSuite"; request: StartSuiteRequest }
   | { type: "getSuite"; id: string }
   | { type: "cancelSuite"; id: string }
+  | { type: "startReview"; request: StartReviewRequest }
+  | { type: "getReview"; id: string }
   | { type: "getEvidence"; runId: string; file: string }
   | { type: "openOptions" };
 
@@ -36,12 +39,14 @@ export interface BgResponses {
   addPersona: Persona;
   removePersona: null;
   createRun: Run;
-  getReportLinks: { executionReport: string; bugReport: string };
+  getReportLinks: { executionReport: string; bugReport: string; reviewReport: string };
   getRuns: { runs: Run[] };
   parseSuite: ParsedSuite;
   startSuite: Suite;
   getSuite: Suite;
   cancelSuite: { cancelled: number; suite: Suite };
+  startReview: Review;
+  getReview: Review;
   getEvidence: { dataUrl: string };
   openOptions: null;
 }

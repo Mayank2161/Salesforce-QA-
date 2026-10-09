@@ -47,6 +47,37 @@ export const BugRef = z.object({
 });
 export type BugRef = z.infer<typeof BugRef>;
 
+// Cost and speed of one run, for comparing execution modes. Token counts come from Claude Code's
+// result; tool result sizes are measured from the stream (about 4 characters per token).
+export const RunMetrics = z.object({
+  // "hybrid": generic batched browser actions available; "classic": one Claude decision per browser action.
+  mode: z.enum(["hybrid", "classic"]),
+  totalMs: z.number().nonnegative(),
+  claudeMs: z.number().nonnegative().optional(),
+  turns: z.number().int().nonnegative().optional(),
+  toolCalls: z.record(z.string(), z.number().int()),
+  // Browser operations performed: single tool calls plus every step inside a batch.
+  browserActions: z.number().int().nonnegative(),
+  batches: z.number().int().nonnegative(),
+  batchSteps: z.number().int().nonnegative(),
+  // Batches that stopped on a step they could not perform, handing control back to Claude.
+  batchFallbacks: z.number().int().nonnegative(),
+  snapshots: z.number().int().nonnegative(),
+  // Screenshots saved as evidence, and how many of them were sent to Claude as images.
+  screenshots: z.number().int().nonnegative(),
+  imagesToClaude: z.number().int().nonnegative(),
+  // Fixed-time waits Claude asked for (browser_wait_for "time") and their total.
+  fixedWaits: z.number().int().nonnegative(),
+  fixedWaitSeconds: z.number().nonnegative(),
+  toolResultChars: z.number().int().nonnegative(),
+  snapshotChars: z.number().int().nonnegative(),
+  tokens: z.object({
+    input: z.number().int(), cacheCreation: z.number().int(), cacheRead: z.number().int(), output: z.number().int(),
+  }).optional(),
+  costUsd: z.number().optional(),
+});
+export type RunMetrics = z.infer<typeof RunMetrics>;
+
 export const Run = z.object({
   id: RunId,
   displayId: DisplayRunId.optional(),
@@ -60,8 +91,9 @@ export const Run = z.object({
   createdAt: IsoDateTime,
   startedAt: IsoDateTime.optional(),
   finishedAt: IsoDateTime.optional(),
+  metrics: RunMetrics.optional(),
 });
-export type Run = z.infer<typeof Run>;
+export type Run =z.infer<typeof Run>;
 
 const SEVERITY: Record<Verdict, number> = { PASS: 0, BLOCKED: 1, FAIL: 2 };
 

@@ -32,6 +32,11 @@ export class SalesforceApi {
     this.#sid = sid;
   }
 
+  // Header for raw REST calls made on this session's behalf (call_api).
+  authorization(): string {
+    return `Bearer ${this.#sid}`;
+  }
+
   #get<T>(path: string): Promise<T> {
     return this.#request<T>("GET", path);
   }

@@ -4,7 +4,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
-  BugReportShape, CreateShape, FinishReportShape, ListTestDataShape, QueryShape, StepReportShape, UpdateShape, type ReportKind,
+  BugReportShape, CallApiShape, CreateShape, FinishReportShape, ListTestDataShape, QueryShape, StepReportShape, UpdateShape, type ReportKind,
 } from "./protocol.ts";
 
 const { SFQA_URL, SFQA_RUN_ID, SFQA_RUN_KEY } = process.env;
@@ -71,6 +71,14 @@ server.registerTool("update_test_record", {
   description: "Change fields on a record created for testing (only records listed by list_test_data), e.g. to assign it to the persona.",
   inputSchema: UpdateShape,
 }, (input) => report("update", input));
+
+server.registerTool("call_api", {
+  description:
+    "Call an API to check what the UI cannot show: the org's Salesforce REST API (records, Apex REST endpoints) or a configured " +
+    "external system the org integrates with. Returns the status and response, and saves them as evidence; put the returned " +
+    "evidence file name in record_step \"apiEvidence\" (or report_bug \"screenshots\").",
+  inputSchema: CallApiShape,
+}, (input) => report("api", input));
 
 server.registerTool("finish_test", {
   description: "Call exactly once at the end with the overall result and the test case details.",

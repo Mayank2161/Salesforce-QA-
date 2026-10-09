@@ -1,6 +1,7 @@
-import type { ParsedSuite, Persona, Suite, SuiteCase, SuiteItem } from "@sfqa/shared";
+import { personaLabel, type ParsedSuite, type Persona, type Suite, type SuiteCase, type SuiteItem } from "@sfqa/shared";
 import { send } from "../messages.ts";
 import { h } from "./dom.ts";
+import { createReviewPanel } from "./review.ts";
 
 // Upload an Excel/CSV of test cases, review the detected rows, then run them one at a time.
 // Each row becomes a normal run on the server, so login, execution, screenshots and reports are
@@ -28,7 +29,7 @@ export function createSuitePanel(ctx: SuiteContext): { element: HTMLElement; ref
   const fileInput = h("input", { type: "file", accept: ".xlsx,.csv", hidden: true });
   const drop = h("div", { className: "drop", tabIndex: 0 },
     h("div", { className: "drop-title", textContent: "\u{1F4C1} Upload Excel / CSV" }),
-    h("div", { className: "hint", textContent: "Drop a .xlsx or .csv file here, or click to choose. Columns: TC ID, Title, Steps, Expected Result (plus Module, Persona, Pre-Req, ...)." }),
+    h("div", { className: "hint", textContent: "Drop a .xlsx or .csv file here, or click to choose. Columns: TC ID, Title, Steps, Expected Result (plus Module, Persona, Pre-Req, ...). For a test with several users, list them in the Persona cell: \"Sales, Sales Manager\"." }),
     fileInput,
   );
   const message = h("div", { className: "suite-msg" });
@@ -36,7 +37,14 @@ export function createSuitePanel(ctx: SuiteContext): { element: HTMLElement; ref
   const personaNote = h("div", { className: "hint" });
   const buttons = h("div", { className: "row end suite-actions" });
   const summary = h("div", { className: "suite-summary", hidden: true });
-  const element = h("div", { className: "suite" }, drop, message, personaNote, table, buttons, summary);
+  // Optional: check the selected rows against a BRD / requirement sheet before (or instead of) running them.
+  const review = createReviewPanel({
+    orgId: () => ctx.orgId(),
+    cases: () => parsed?.cases.filter((c) => !c.error && c.tcId && selected.has(c.row)) ?? [],
+    testCasesFileName: () => parsed?.fileName,
+  });
+  review.element.hidden = true;
+  const element = h("div", { className: "suite" }, drop, message, personaNote, table, buttons, review.element, summary);
 
   // --- Choosing a file ----------------------------------------------------------
 
@@ -56,6 +64,7 @@ export function createSuitePanel(ctx: SuiteContext): { element: HTMLElement; ref
     if (isActive()) return showMessage("warn", "A batch is still running. Stop it or wait for it to finish first.");
     forgetSuite();
     parsed = undefined;
+    review.element.hidden = true;
     table.replaceChildren();
     buttons.replaceChildren();
     if (!/\.(xlsx|csv)$/i.test(file.name)) return showMessage("err", `"${file.name}" is not an Excel .xlsx or .csv file.`);
@@ -96,6 +105,8 @@ export function createSuitePanel(ctx: SuiteContext): { element: HTMLElement; ref
     table.replaceChildren(headerRow(all), ...parsed.cases.map(reviewRow));
     renderPersonaNote();
     renderReviewButtons();
+    review.element.hidden = false;
+    review.update();
   }
 
   function reviewRow(c: SuiteCase): HTMLElement {
@@ -123,9 +134,11 @@ export function createSuitePanel(ctx: SuiteContext): { element: HTMLElement; ref
 
   function personaFor(c: SuiteCase): string | undefined {
     if (c.error) return c.personaLabel;
-    if (c.personaId) return ctx.personas().find((p) => p.id === c.personaId)?.name ?? c.personaLabel;
+    const name = (id: string) => { const p = ctx.personas().find((x) => x.id === id); return p ? personaLabel(p, ctx.personas()) : id; };
+    const extra = (c.extraPersonaIds ?? []).map(name);
     const d = ctx.defaultPersona();
-    return d ? `${d.name} (default)` : undefined;
+    const first = c.personaId ? name(c.personaId) : d ? `${personaLabel(d, ctx.personas())} (default)` : undefined;
+    return first ? [first, ...extra].join(" + ") : undefined;
   }
 
   function renderPersonaNote(): void {
@@ -157,6 +170,7 @@ export function createSuitePanel(ctx: SuiteContext): { element: HTMLElement; ref
     selected.clear();
     for (const el of [table, buttons, personaNote]) el.replaceChildren();
     summary.hidden = true;
+    review.element.hidden = true;
     showMessage("", "");
   }
 
@@ -176,6 +190,7 @@ export function createSuitePanel(ctx: SuiteContext): { element: HTMLElement; ref
             title: c.title,
             ...(c.module && { module: c.module }),
             ...(c.personaId && { personaId: c.personaId }),
+            ...(c.extraPersonaIds?.length && { extraPersonaIds: c.extraPersonaIds }),
             body: c.body,
           })),
         },
@@ -310,6 +325,8 @@ export function createSuitePanel(ctx: SuiteContext): { element: HTMLElement; ref
 
   // Re-renders persona-dependent parts, and picks a batch back up after a page reload.
   async function refresh(): Promise<void> {
+    // A review started before a page reload is shown again even though the file has to be re-uploaded.
+    if (!parsed) void review.resume().then((found) => { if (found) review.element.hidden = false; });
     if (parsed && !suite) return renderReview();
     if (suite) return renderSuite();
     const saved = await chrome.storage.local.get(LAST_SUITE_KEY).catch(() => ({} as Record<string, unknown>));

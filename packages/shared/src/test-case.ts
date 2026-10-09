@@ -12,6 +12,9 @@ export type TestCase = z.infer<typeof TestCase>;
 export const RunRequest = z.object({
   orgId: SlugId,
   personaId: SlugId,
+  // Other personas the test case needs (for example a manager who approves what the first persona
+  // submitted). Each gets its own browser, logged in as that persona, for the whole run.
+  extraPersonaIds: z.array(SlugId).max(3).optional(),
   testCase: TestCase,
   // Set when the run is one row of an uploaded batch (see suite.ts).
   suiteId: z.string().max(40).optional(),

@@ -106,8 +106,21 @@ describe("personas", () => {
     assert.equal((await post("/orgs/rms-dev/personas", { ...jeff, name: "Bad", userId: "001xx0000000001" })).statusCode, 400);
   });
 
-  test("duplicate persona is 409, unknown org is 404, blank name is 400", async () => {
-    assert.equal((await post("/orgs/rms-dev/personas", { ...jeff, name: "sales user" })).statusCode, 409);
+  test("the same user under the same name is 409; a different user may share the name", async () => {
+    const dup = await post("/orgs/rms-dev/personas", { ...jeff, name: "sales user" });
+    assert.equal(dup.statusCode, 409);
+    assert.equal(dup.json().error, "persona_exists");
+
+    const sam = await post("/orgs/rms-dev/personas", { ...jeff, name: "Sales User", username: "sam.lofts@rms.dev", userId: "005bc00000UT0rSAAT", userFullName: "Sam Lofts" });
+    assert.equal(sam.statusCode, 201);
+    assert.equal(sam.json().id, "sales-user-2");
+    assert.equal(sam.json().name, "Sales User");
+    const ids = (await savedConfig()).orgs.find((o) => o.id === "rms-dev")!.personas.map((p) => p.id);
+    assert.deepEqual(ids.filter((i) => i.startsWith("sales-user")), ["sales-user", "sales-user-2"]);
+    assert.equal((await app.inject({ method: "DELETE", url: "/orgs/rms-dev/personas/sales-user-2", headers: auth })).statusCode, 204);
+  });
+
+  test("unknown org is 404, blank name is 400", async () => {
     assert.equal((await post("/orgs/nope/personas", jeff)).statusCode, 404);
     assert.equal((await post("/orgs/rms-dev/personas", { ...jeff, name: "  " })).statusCode, 400);
     assert.equal((await post("/orgs/rms-dev/personas", { ...jeff, name: "!!!" })).statusCode, 400);

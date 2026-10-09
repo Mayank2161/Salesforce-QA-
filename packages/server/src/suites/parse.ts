@@ -93,6 +93,12 @@ export function matchPersona(label: string, personas: Persona[]): Persona | unde
   return undefined;
 }
 
+// Persona cell -> persona names, in order. Separators: comma, semicolon, "+", "&", arrows, "then", new line.
+// ("and" is not one: persona names like "Sales and Marketing" contain it.)
+export function splitPersonas(cell: string): string[] {
+  return cell.split(/\s*(?:,|;|\+|&|->|→|=>|\bthen\b|\n)\s*/i).map((s) => s.trim()).filter(Boolean);
+}
+
 export function toSuite(fileName: string, rows: string[][], personas: Persona[], sheet?: string): ParsedSuite {
   const headerIndex = findHeaderRow(rows);
   const header = headerIndex >= 0 ? rows[headerIndex]! : (rows[0] ?? []);
@@ -119,19 +125,27 @@ export function toSuite(fileName: string, rows: string[][], personas: Persona[],
     const tcId = get("tcId");
     const title = get("title") || get("description").split("\n")[0]!.slice(0, 200) || "(no title)";
     const personaLabel = get("persona");
-    const persona = personaLabel ? matchPersona(personaLabel, personas) : undefined;
+    // "Sales User, Sales Manager" or "Sales -> Manager": a multi-persona test, first persona first.
+    const labels = splitPersonas(personaLabel);
+    const persona = labels[0] ? matchPersona(labels[0], personas) : undefined;
+    const otherPersonas = labels.slice(1).map((l) => ({ label: l, persona: matchPersona(l, personas) }));
 
     let error: string | undefined;
     if (!tcId) error = "No TC ID in this row.";
     else if (!get("steps")) error = "No Steps in this row.";
     else if (!get("expected")) error = "No Expected Result in this row.";
+    else if (labels.length > 4) error = "A test can involve at most 4 personas.";
+    else if (otherPersonas.some((e) => !e.persona)) {
+      error = `Persona ${otherPersonas.filter((e) => !e.persona).map((e) => `"${e.label}"`).join(", ")} does not match a persona in this org. Add it in the panel, then upload the file again.`;
+    }
 
     let warning: string | undefined;
     if (tcId && seen.has(tcId)) warning = `Duplicate TC ID (also in row ${seen.get(tcId)}).`;
-    if (personaLabel && !persona) {
-      const p = `Persona "${personaLabel}" does not match a persona in this org; the default persona will be used.`;
+    if (labels[0] && !persona) {
+      const p = `Persona "${labels[0]}" does not match a persona in this org; the default persona will be used.`;
       warning = warning ? `${warning} ${p}` : p;
     }
+    const extraPersonaIds = [...new Set(otherPersonas.map((e) => e.persona?.id).filter((id): id is string => Boolean(id) && id !== persona?.id))];
     if (tcId && !seen.has(tcId)) seen.set(tcId, rowNumber);
 
     cases.push({
@@ -141,6 +155,7 @@ export function toSuite(fileName: string, rows: string[][], personas: Persona[],
       ...(get("module") && { module: get("module") }),
       ...(personaLabel && { personaLabel }),
       ...(persona && { personaId: persona.id }),
+      ...(extraPersonaIds.length && { extraPersonaIds }),
       body: caseBody(get, extras.map((e) => ({ label: e.label, value: (cells[e.i] ?? "").trim() }))),
       ...(error && { error }),
       ...(warning && { warning }),

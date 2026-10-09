@@ -3,18 +3,26 @@ import { z } from "zod";
 import { tokensMatch } from "../api/security.ts";
 import {
   REPORT_SCHEMAS,
-  type BugReport, type Create, type FinishReport, type ListTestData, type Query, type ReportKind, type StepReport, type Update,
+  type BugReport, type CallApi, type Create, type FinishReport, type FinishReview, type ListTestData, type Query, type ReportKind,
+  type RequirementsReport, type StepReport, type Update, type VerdictReport,
 } from "./protocol.ts";
 
+// A test run provides the run tools; a test case review provides the review tools.
 export interface AgentHandlers {
-  step(report: StepReport): Promise<string>;
-  bug(report: BugReport): Promise<string>;
-  finish(report: FinishReport): Promise<string>;
+  step?(report: StepReport): Promise<string>;
+  bug?(report: BugReport): Promise<string>;
+  finish?(report: FinishReport): Promise<string>;
   // Test data setup; optional so a run can be started without it.
   query?(request: Query): Promise<string>;
   create?(request: Create): Promise<string>;
   update?(request: Update): Promise<string>;
   testdata?(request: ListTestData): Promise<string>;
+  // API checks (Salesforce REST or a configured external system).
+  api?(request: CallApi): Promise<string>;
+  // Test case review against a requirements document.
+  requirements?(report: RequirementsReport): Promise<string>;
+  verdict?(report: VerdictReport): Promise<string>;
+  reviewDone?(report: FinishReview): Promise<string>;
 }
 
 export interface DispatchResult {

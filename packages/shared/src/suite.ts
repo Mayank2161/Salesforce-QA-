@@ -14,6 +14,8 @@ export const SuiteCase = z.object({
   // Persona as written in the file, and the configured persona it matched (if any).
   personaLabel: z.string().optional(),
   personaId: SlugId.optional(),
+  // Further personas listed in the same cell ("Sales User, Sales Manager"), in order.
+  extraPersonaIds: z.array(SlugId).optional(),
   // Test case text handed to Claude: the row's columns as labelled lines.
   body: z.string(),
   // Set when the row cannot be run (e.g. no TC ID).
@@ -51,6 +53,7 @@ export const StartSuiteRequest = z.object({
     title: z.string().max(300),
     module: z.string().max(80).optional(),
     personaId: SlugId.optional(),
+    extraPersonaIds: z.array(SlugId).max(3).optional(),
     body: z.string().trim().min(1).max(20_000),
   })).min(1).max(200),
 });

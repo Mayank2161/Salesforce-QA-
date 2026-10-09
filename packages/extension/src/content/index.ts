@@ -1,4 +1,4 @@
-import type { Org, Persona, Run, RunEvent, SalesforceUser, StepResult } from "@sfqa/shared";
+import { personaLabel, type Org, type Persona, type Run, type RunEvent, type SalesforceUser, type StepResult } from "@sfqa/shared";
 import { RUN_EVENTS_PORT, send, type Connection, type PortMessage } from "../messages.ts";
 import { h, logo } from "./dom.ts";
 import { createSuitePanel } from "./suite.ts";
@@ -21,21 +21,27 @@ const orgSelect = h("select");
 const orgHint = h("span", { className: "hint" });
 const orgConnRow = h("div", { className: "login-row" });
 const personaSelect = h("select");
-const addPersonaButton = h("button", { className: "btn secondary", title: "Add a persona", textContent: "+ Add" });
-const removePersonaButton = h("button", { className: "btn secondary", title: "Remove this persona", textContent: "Remove" });
+const addPersonaButton = h("button", { className: "btn link", title: "Add a persona", textContent: "+ Add persona" });
+const removePersonaButton = h("button", { className: "btn link danger", title: "Remove this persona", textContent: "Remove" });
 const personaHint = h("div", { className: "hint" });
 
 // Add persona: pick the Salesforce user it runs as, then name it.
 const userSearch = h("input", { placeholder: "Search users by name or username" });
 const userResults = h("div", { className: "user-results" });
-const newPersonaName = h("input", { placeholder: "Persona name, e.g. Sales Manager" });
+const newPersonaName = h("input", { placeholder: "e.g. Sales, Sales Manager" });
 const addPersonaError = h("div", { className: "hint warn" });
 const addPersonaSubmit = h("button", { className: "btn small", textContent: "Add persona", disabled: true });
 let pickedUser: SalesforceUser | undefined;
+const step = (n: string, title: string, hint: string) => h("div", { className: "step-head" },
+  h("span", { className: "step-num", textContent: n }),
+  h("div", {}, h("div", { className: "step-name", textContent: title }), h("div", { className: "hint", textContent: hint })),
+);
 const addPersonaForm = h("div", { className: "subform", hidden: true },
-  h("div", { className: "hint", textContent: "Pick the Salesforce user this persona runs as. Tests log in as them with Login As." }),
+  h("div", { className: "subform-title", textContent: "New persona" }),
+  step("1", "Choose the Salesforce user", "Tests log in as this user with Login As."),
   userSearch,
   userResults,
+  step("2", "Name the persona", "Several users can share a name, for example two Sales users."),
   newPersonaName,
   addPersonaError,
   h("div", { className: "row end" },
@@ -44,13 +50,24 @@ const addPersonaForm = h("div", { className: "subform", hidden: true },
   ),
 );
 
+// Other personas a single test needs (for example the manager who approves). Each gets its own browser.
+const extraPersonasBox = h("div", { className: "extra-personas" });
+const extraPersonasField = h("div", { className: "field", hidden: true },
+  h("div", { className: "field-label", textContent: "Also involves (optional)" }),
+  extraPersonasBox,
+  h("div", { className: "hint", textContent: "Tick the other users this test needs, for example a manager who approves. Each runs in its own browser, logged in as that user." }),
+);
+const selectedExtraPersonas = (): string[] =>
+  [...extraPersonasBox.querySelectorAll<HTMLInputElement>("input:checked")].map((i) => i.value).filter((id) => id !== personaSelect.value);
+
 const titleInput = h("input", { placeholder: "e.g. Sales manager can close an opportunity" });
 const bodyInput = h("textarea", { placeholder: "Paste the test case: steps and expected results" });
-const runButton = h("button", { className: "btn", textContent: "Run test" });
+const runButton = h("button", { className: "btn primary block", textContent: "Run test" });
 const result = h("div", { className: "result", hidden: true });
 
 // Single pasted test case (unchanged) or a batch uploaded from Excel/CSV.
 const singleBox = h("div", { className: "mode-box" },
+  extraPersonasField,
   h("label", {}, "Title (optional)", titleInput),
   h("label", {}, "Test case", bodyInput),
   runButton,
@@ -83,23 +100,36 @@ function setMode(mode: "single" | "suite"): void {
 singleTab.onclick = () => setMode("single");
 suiteTab.onclick = () => setMode("suite");
 
+const section = (title: string, ...children: (Node | string)[]) =>
+  h("section", { className: "card" }, h("div", { className: "card-title", textContent: title }), ...children);
+
 const panel = h("div", { className: "panel", hidden: true },
   h("div", { className: "header" },
     logo("header-logo"),
-    h("h1", { textContent: "Salesforce QA Agent" }),
+    h("div", { className: "title" },
+      h("h1", { textContent: "Salesforce QA Agent" }),
+      h("div", { className: "subtitle", textContent: "AI-driven testing in your org" }),
+    ),
     h("button", { className: "icon-btn", title: "Reload orgs and personas", textContent: "↻", onclick: () => void refresh() }),
     h("button", { className: "icon-btn", title: "Close", textContent: "✕", onclick: () => { panel.hidden = true; } }),
   ),
   h("div", { className: "body" },
     conn,
-    h("label", {}, "Org", orgSelect, orgHint),
-    orgConnRow,
-    h("label", {}, "Persona", h("div", { className: "row" }, personaSelect, addPersonaButton, removePersonaButton)),
-    personaHint,
-    addPersonaForm,
-    modeTabs,
-    singleBox,
-    suiteBox,
+    section("Environment",
+      h("label", {}, "Org", orgSelect, orgHint),
+      orgConnRow,
+    ),
+    section("Run as",
+      h("label", {}, "Persona", personaSelect),
+      personaHint,
+      h("div", { className: "row" }, addPersonaButton, removePersonaButton),
+      addPersonaForm,
+    ),
+    h("section", { className: "card" },
+      modeTabs,
+      singleBox,
+      suiteBox,
+    ),
   ),
 );
 
@@ -250,7 +280,23 @@ function renderPersonas(preferredId?: string): void {
     if (personas.some((p) => p.id === previous)) personaSelect.value = previous;
   }
   removePersonaButton.hidden = personas.length === 0;
+  renderExtraPersonas();
   renderPersonaHint();
+}
+
+// Checkboxes for the other personas of the org; the selected main persona is never offered.
+function renderExtraPersonas(): void {
+  const keep = new Set(selectedExtraPersonas());
+  const others = (currentOrg()?.personas ?? []).filter((p) => p.id !== personaSelect.value);
+  extraPersonasField.hidden = others.length === 0;
+  extraPersonasBox.replaceChildren(...others.map((p) => {
+    const box = h("input", { type: "checkbox", value: p.id, checked: keep.has(p.id) });
+    box.onchange = () => {
+      // At most 3 other personas (4 browsers in total).
+      if (selectedExtraPersonas().length > 3) box.checked = false;
+    };
+    return h("label", { className: "chip", title: p.userFullName ?? p.name }, box, h("span", { textContent: personaLabel(p, currentOrg()?.personas ?? []) }));
+  }));
 }
 
 function renderPersonaHint(): void {
@@ -348,7 +394,9 @@ addPersonaSubmit.onclick = async () => {
     renderPersonas(persona.id);
   } catch (err) {
     const message = (err as Error).message;
-    addPersonaError.textContent = message === "persona_exists" ? "A persona with that name already exists." : message;
+    addPersonaError.textContent = message === "persona_exists"
+      ? `${pickedUser.name} is already set up as "${name}". Pick another user or use a different name.`
+      : message;
   }
 };
 
@@ -365,7 +413,10 @@ orgSelect.onchange = () => {
   toggleAddPersona(false);
   renderOrg();
 };
-personaSelect.onchange = () => renderPersonaHint();
+personaSelect.onchange = () => {
+  renderExtraPersonas();
+  renderPersonaHint();
+};
 addPersonaButton.onclick = () => toggleAddPersona(addPersonaForm.hidden);
 
 // --- Running a test ----------------------------------------------------------
@@ -398,7 +449,8 @@ async function startRun(): Promise<void> {
 
   try {
     const title = titleInput.value.trim();
-    const run = await send({ type: "createRun", request: { orgId, personaId, testCase: { body, ...(title && { title }) } } });
+    const extraPersonaIds = selectedExtraPersonas();
+    const run = await send({ type: "createRun", request: { orgId, personaId, ...(extraPersonaIds.length && { extraPersonaIds }), testCase: { body, ...(title && { title }) } } });
     watchRun(run.id);
   } catch (err) {
     result.replaceChildren(h("div", { className: "error-box", textContent: (err as Error).message }));
@@ -517,7 +569,8 @@ function renderStep(runId: string, step: StepResult): HTMLElement {
     ),
   );
   if (step.actual) box.append(h("div", { className: "actual", textContent: step.actual }));
-  for (const file of step.screenshots) {
+  for (const file of step.screenshots.filter((f) => f.endsWith(".json"))) box.append(renderApiEvidence(runId, file));
+  for (const file of step.screenshots.filter((f) => !f.endsWith(".json"))) {
     const img = h("img", { alt: `Screenshot for step ${step.index + 1}`, title: "Click to enlarge" });
     img.onclick = () => img.classList.toggle("zoomed");
     box.append(img);
@@ -526,6 +579,25 @@ function renderStep(runId: string, step: StepResult): HTMLElement {
       (err: Error) => img.replaceWith(h("div", { className: "hint warn", textContent: `Screenshot unavailable: ${err.message}` })),
     );
   }
+  return box;
+}
+
+// An API check recorded by call_api: method, path and status, with the response on demand.
+function renderApiEvidence(runId: string, file: string): HTMLElement {
+  const head = h("summary", { textContent: `API call (${file})` });
+  const body = h("pre", { className: "api-body" });
+  const box = h("details", { className: "api-evidence" }, head, body);
+  send({ type: "getEvidence", runId, file }).then(({ dataUrl }) => {
+    const bytes = Uint8Array.from(atob(dataUrl.slice(dataUrl.indexOf(",") + 1)), (c) => c.charCodeAt(0));
+    const e = JSON.parse(new TextDecoder().decode(bytes)) as {
+      purpose?: string; target?: string; request: { method: string; url: string }; response: { status: number; statusText?: string; body: unknown };
+    };
+    const url = new URL(e.request.url);
+    head.textContent = `API ${e.request.method} ${url.pathname} → ${e.response.status}${e.purpose ? ` · ${e.purpose}` : ""}`;
+    head.className = e.response.status >= 200 && e.response.status < 300 ? "ok" : "bad";
+    const text = typeof e.response.body === "string" ? e.response.body : JSON.stringify(e.response.body, null, 2);
+    body.textContent = `${e.target ?? ""} ${e.request.method} ${url.pathname}${url.search}\n\n${text.length > 3000 ? `${text.slice(0, 3000)}\n…` : text}`;
+  }, (err: Error) => { head.textContent = `API evidence unavailable: ${err.message}`; });
   return box;
 }
 

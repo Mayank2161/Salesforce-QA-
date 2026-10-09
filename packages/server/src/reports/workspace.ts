@@ -5,6 +5,7 @@ import { writeFileAtomic } from "../fs-utils.ts";
 // The qa/ folder, laid out like the RMS QA project so its report pages work unchanged:
 //   qa/reports/Test_Execution_Report.html + execution-data.js
 //   qa/bugs/Bug_Report.html + bug-data.js + <BUG-ID>/ evidence
+//   qa/reviews/Test_Case_Review.html + review-data.js (test cases checked against a BRD)
 //   qa/Screenshots/<RUN-ID>/ step screenshots
 //   qa/assets/ shared CSS/JS
 // The data files are the source of truth (the report pages can also save status edits into them).
@@ -62,7 +63,27 @@ const BUGS = {
     "// Attachment paths are relative to this bugs/ folder. Each bug keeps its evidence in bugs/<BUG-ID>/.",
 };
 
+const REVIEWS = {
+  file: ["reviews", "review-data.js"],
+  global: "TEST_CASE_REVIEWS",
+  header:
+    "// Test case reviews against a requirements document (BRD). One object per review; the page (Test_Case_Review.html) reads this file.\n" +
+    '// verdict: "Correct" | "Needs update" | "Incorrect" | "Not traceable"',
+};
+
 type DataFile = typeof EXECUTIONS;
+
+export interface ReviewRecord {
+  reviewId: string;
+  createdOn: string;
+  environment: string;
+  testCasesFile: string;
+  requirementsFile: string;
+  status: "Complete" | "Incomplete";
+  cases: { tcId: string; verdict: string; requirementIds: string[] }[];
+  requirements: { id: string; title: string }[];
+  [field: string]: unknown;
+}
 
 // A record the agent created for testing, kept so later test cases can reuse it.
 export interface TestDataRecord {
@@ -76,14 +97,16 @@ export interface TestDataRecord {
   createdOn: string;
 }
 
-// Screenshot names Claude may save: flat, no paths.
-export const EVIDENCE_NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,120}\.(png|jpe?g)$/;
+// Evidence file names: screenshots Claude saves (flat, no paths) and the request/response records
+// the server writes for call_api (api_02_get_account.json).
+export const EVIDENCE_NAME = /^(?:[A-Za-z0-9][A-Za-z0-9_.-]{0,120}\.(?:png|jpe?g)|api_\d{2,3}_[a-z0-9_-]{1,80}\.json)$/;
 
 export class QaWorkspace {
   readonly root: string;
   readonly #templates: string;
   #queue: Promise<unknown> = Promise.resolve();
   #reservedRunIds = new Set<string>();
+  #reservedReviewIds = new Set<string>();
 
   constructor(root: string, templatesDir: string) {
     this.root = root;
@@ -94,8 +117,9 @@ export class QaWorkspace {
   async ensure(): Promise<void> {
     await mkdir(join(this.root, "Screenshots"), { recursive: true });
     await cp(this.#templates, this.root, { recursive: true, force: false, errorOnExist: false });
-    for (const df of [EXECUTIONS, BUGS]) {
+    for (const df of [EXECUTIONS, BUGS, REVIEWS]) {
       const path = join(this.root, ...df.file);
+      await mkdir(join(this.root, df.file[0]!), { recursive: true });
       await readFile(path).catch(() => writeFile(path, `${df.header}\nwindow.${df.global} = [];\n`));
     }
   }
@@ -118,6 +142,34 @@ export class QaWorkspace {
       this.#reservedRunIds.add(id);
       await mkdir(this.screenshotsDir(id), { recursive: true });
       return id;
+    });
+  }
+
+  // REV-YYYYMMDD-NNN, numbered per day.
+  nextReviewId(date = new Date()): Promise<string> {
+    return this.#serial(async () => {
+      const prefix = `REV-${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}-`;
+      const recorded = (await this.#read<ReviewRecord>(REVIEWS)).map((r) => r.reviewId);
+      let max = 0;
+      for (const id of [...recorded, ...this.#reservedReviewIds]) {
+        if (id.startsWith(prefix)) max = Math.max(max, Number(id.slice(prefix.length)) || 0);
+      }
+      const id = `${prefix}${String(max + 1).padStart(3, "0")}`;
+      this.#reservedReviewIds.add(id);
+      return id;
+    });
+  }
+
+  listReviews(): Promise<ReviewRecord[]> {
+    return this.#read<ReviewRecord>(REVIEWS);
+  }
+
+  appendReview(record: ReviewRecord): Promise<void> {
+    return this.#serial(async () => {
+      const reviews = await this.#read<ReviewRecord>(REVIEWS);
+      reviews.push(record);
+      await this.#write(REVIEWS, reviews);
+      this.#reservedReviewIds.delete(record.reviewId);
     });
   }
 

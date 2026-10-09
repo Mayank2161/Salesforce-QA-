@@ -72,6 +72,10 @@ async function handle(req: BgRequest): Promise<unknown> {
       return json(`/suites/${encodeURIComponent(req.id)}`);
     case "cancelSuite":
       return json(`/suites/${encodeURIComponent(req.id)}/cancel`, jsonBody({}));
+    case "startReview":
+      return json("/reviews", jsonBody(req.request));
+    case "getReview":
+      return json(`/reviews/${encodeURIComponent(req.id)}`);
     case "getEvidence": {
       const res = await api(`/runs/${encodeURIComponent(req.runId)}/evidence/${encodeURIComponent(req.file)}`);
       const type = res.headers.get("content-type") ?? "image/png";

@@ -57,6 +57,49 @@ In the panel, switch to **Upload file (Excel / CSV)** and drop a `.xlsx` or `.cs
 - **Running:** **Run Selected** or **Run All** runs the rows **one at a time**, each through the normal single-test flow (Login As, Claude, screenshots, execution report, bug reports). **Stop remaining** cancels rows that have not started.
 - **Results:** a summary (Total / Passed / Failed / Blocked), each TC ID linking to its report entry, and **Open batch in report** (`Test_Execution_Report.html#suite=SUITE-…`).
 
+### Tests with several users (multi-persona)
+
+Some tests need more than one user, for example Sales submits a discount and the Sales Manager approves it.
+
+- **Single test:** pick the first persona as usual, then tick the others under **Also involves**.
+- **Excel / CSV:** list the personas in the Persona cell, first one first: `Sales User, Sales Manager` (also `+`, `;`, `->`, `then`).
+
+Every persona logs in through Login As before the test starts and gets **its own browser** for the whole run. Claude performs each step in the browser of the persona the step is for, and the step is labelled with the persona (`[Sales Manager] Approve the discount`). Up to 4 personas per test. Right after the logins, the run checks that every session is still active. If Salesforce ended an earlier Login As when a later one started, the run is BLOCKED with that explanation.
+
+### API checks (integration testing)
+
+Claude can call APIs in a test (`call_api`) to check what the UI cannot show:
+
+- **The org's REST API** (`/services/data/...`, `/services/apexrest/...`): as the admin, or as one of the run's personas to check that user's own access. Only GET is allowed on `/services/data/`. POST/PUT/PATCH are allowed only to Apex REST endpoints, for example to simulate an external system pushing data in.
+- **External systems** the org integrates with, listed in `config/apis.json` (copy `config/apis.example.json`). Only these base URLs can be called. They are read-only unless `"allowWrite": true`. Secrets go in `.env` and are referenced as `${NAME}` in headers, so Claude never sees them.
+
+Each call's request and response are saved as evidence (`api_NN_....json`) next to the screenshots. They are shown in the panel and linked from the execution report, and a step checked through an API uses that file as its evidence instead of a screenshot.
+
+### How Claude drives the browser (hybrid execution)
+
+Claude reads the test case, decides every action and judges every result. It has two ways to act in the browser:
+
+- **Single browser tools** (`browser_snapshot`, `browser_click`, ...): one decision per action. Claude uses these to explore pages it has not seen yet and to handle anything dynamic: conditional fields, unexpected popups or errors, and negative scenarios.
+- **`run_steps`**: several actions Claude has already decided on, done in one call. It covers navigate, click, fill, select, lookup, check, upload, the waits, reading fields and picklist options, verify checks, and evidence screenshots. Elements are found by visible label, role or text. Each action waits for Lightning spinners to clear, so no fixed waits are needed. The result is a short line per action plus any toasts, errors and dialogs on the page.
+
+`run_steps` holds no business logic. It stops at the first element it cannot find for certain (missing or ambiguous), at an unexpected dialog, or at a check that does not match. Claude then takes over with the single tools. Evidence and PASS/FAIL/BLOCKED rules are the same in both modes. Screenshots taken through `run_steps` are saved as evidence but not sent to Claude.
+
+Each run logs its cost and speed (`Metrics (...)` in the panel log, `metrics` in `runs/<id>/run.json`): turns, tokens, browser actions, batches and fallbacks, snapshots, screenshots, and fixed waits. Set `HYBRID_EXECUTION=false` in `.env` to go back to one Claude decision per browser action.
+
+### Checking test cases against the BRD / requirement sheet
+
+After uploading test cases, the **Check test cases against requirements** section (optional) checks the selected rows against a requirements document. Nothing runs in Salesforce and no org connection is needed.
+
+1. Add the BRD or requirement sheet: PDF (with selectable text), Word `.docx`, Excel `.xlsx`, `.csv`, `.txt` or `.md`, up to 10 MB.
+2. Click **Analyse N test cases**. Claude reads the document, lists its requirements, and gives each test case a verdict:
+   - **Correct**: traceable to a requirement and matches it.
+   - **Needs update**: mostly right, but a value, step, precondition or persona should change (a corrected version is suggested).
+   - **Incorrect**: contradicts the requirement (a corrected version is suggested).
+   - **Not traceable**: no requirement covers it.
+3. It then lists **missing test cases** (requirements no test case checks, each with a suggested test case) and **questions for the business** (ambiguities in the requirements).
+
+Progress shows in the panel; one review runs at a time. **Open review report** opens `qa/reviews/Test_Case_Review.html`, which shows requirement coverage, the verdicts with suggested fixes, and earlier reviews (data in `qa/reviews/review-data.js`).
+
 The same is available from the terminal:
 
 ```powershell

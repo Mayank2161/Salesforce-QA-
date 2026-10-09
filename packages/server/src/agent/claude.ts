@@ -1,5 +1,6 @@
 import { spawn, spawnSync } from "node:child_process";
 import { createInterface } from "node:readline";
+import { MetricsCollector, type SessionMetrics } from "./metrics.ts";
 
 export interface ClaudeSettings {
   // Path or command name of the Claude Code CLI.
@@ -24,6 +25,7 @@ export interface ClaudeRunResult {
   error?: string;
   turns?: number;
   durationMs?: number;
+  metrics?: SessionMetrics;
 }
 
 // The child must use the signed-in Claude Code account (the org's Team seat), never API billing,
@@ -37,7 +39,8 @@ export function claudeChildEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.Pro
   return child;
 }
 
-export function claudeArgs(settings: ClaudeSettings, mcpConfigPath: string): string[] {
+// A test run uses the browser and QA tools; a test case review only the QA (review) tools.
+export function claudeArgs(settings: ClaudeSettings, mcpConfigPath: string, allowedTools = ["mcp__playwright", "mcp__qa"]): string[] {
   return [
     "-p",
     "--output-format", "stream-json",
@@ -46,9 +49,9 @@ export function claudeArgs(settings: ClaudeSettings, mcpConfigPath: string): str
     "--max-turns", String(settings.maxTurns),
     "--mcp-config", mcpConfigPath,
     "--strict-mcp-config",
-    // No built-in tools (shell, file edits): only the browser and QA MCP tools below.
+    // No built-in tools (shell, file reads or edits): only the MCP tools below.
     "--tools", "",
-    "--allowedTools", "mcp__playwright", "mcp__qa",
+    "--allowedTools", ...allowedTools,
     "--setting-sources", "project",
     "--no-session-persistence",
   ];
@@ -63,7 +66,13 @@ interface ContentBlock {
 
 // One-line description of a tool call for the live log.
 export function describeToolUse(name: string, input: Record<string, unknown> = {}): string | undefined {
-  const tool = name.replace(/^mcp__(playwright|qa)__/, "");
+  // Second and later personas' browsers are mcp__playwright_2__..., mcp__playwright_3__...
+  const persona = /^mcp__playwright_(\d+)__/.exec(name)?.[1];
+  const line = describeTool(name.replace(/^mcp__(playwright(?:_\d+)?|qa)__/, ""), input);
+  return line && persona ? `[persona ${persona}] ${line}` : line;
+}
+
+function describeTool(tool: string, input: Record<string, unknown>): string | undefined {
   const target = String(input.element ?? input.url ?? input.filename ?? input.text ?? "").slice(0, 120);
   switch (tool) {
     case "browser_snapshot":
@@ -73,6 +82,10 @@ export function describeToolUse(name: string, input: Record<string, unknown> = {
       return `Recording step ${String(input.n)}: ${String(input.status)}`;
     case "report_bug":
       return `Filing bug: ${String(input.title ?? "").slice(0, 120)}`;
+    case "run_steps": {
+      const steps = Array.isArray(input.steps) ? (input.steps as { action?: string }[]) : [];
+      return `Running ${steps.length} action(s): ${steps.map((s) => s.action).join(", ").slice(0, 160)}`;
+    }
     case "finish_test":
       return `Finishing test: ${String(input.status)}`;
     case "query_records":
@@ -81,7 +94,13 @@ export function describeToolUse(name: string, input: Record<string, unknown> = {
       return "Checking test data from earlier runs";
     case "create_record":
     case "update_test_record":
-      return undefined; // the server logs the result with the record Id
+    case "call_api":
+    case "review_test_case":
+      return undefined; // the server logs the result (record Id, API status, verdict)
+    case "record_requirements":
+      return `Recording ${Array.isArray(input.requirements) ? input.requirements.length : ""} requirements from the document`;
+    case "finish_review":
+      return "Writing the review summary and coverage gaps";
     default:
       return target ? `${tool.replace(/^browser_/, "")}: ${target}` : tool.replace(/^browser_/, "");
   }
@@ -93,11 +112,12 @@ export function runClaude(opts: {
   cwd: string;
   mcpConfigPath: string;
   prompt: string;
+  allowedTools?: string[];
   onLog: (level: "info" | "warn" | "error", message: string) => void;
 }): Promise<ClaudeRunResult> {
   const { settings, onLog } = opts;
   return new Promise((resolve) => {
-    const child = spawn(settings.command, claudeArgs(settings, opts.mcpConfigPath), {
+    const child = spawn(settings.command, claudeArgs(settings, opts.mcpConfigPath, opts.allowedTools), {
       cwd: opts.cwd,
       env: claudeChildEnv(),
       windowsHide: true,
@@ -105,13 +125,24 @@ export function runClaude(opts: {
     });
 
     let result: ClaudeRunResult | undefined;
+    const metrics = new MetricsCollector();
     let stderr = "";
     let timedOut = false;
 
+    const timedOutResult = (): ClaudeRunResult => {
+      const pending = metrics.pendingTools();
+      return {
+        ok: false,
+        error: `Timed out after ${Math.round(settings.timeoutMs / 60_000)} minutes${pending.length ? ` while waiting for ${pending.join(", ")} to return` : ""}.`,
+        metrics: metrics.metrics,
+      };
+    };
     const timer = setTimeout(() => {
       timedOut = true;
       onLog("error", `Run exceeded ${Math.round(settings.timeoutMs / 60_000)} minutes; stopping Claude.`);
       killTree(child.pid);
+      // A process that keeps the output pipe open must not hold the run (and the queue) after the kill.
+      setTimeout(() => resolve(timedOutResult()), 15_000).unref();
     }, settings.timeoutMs);
 
     child.on("error", (err) => {
@@ -130,6 +161,7 @@ export function runClaude(opts: {
       } catch {
         return;
       }
+      metrics.onMessage(msg);
       if (msg.type === "system" && msg.subtype === "init") {
         for (const s of (msg.mcp_servers as { name: string; status: string }[] | undefined) ?? []) {
           if (s.status !== "connected") onLog("error", `Tool server "${s.name}" failed to start (${s.status}).`);
@@ -157,8 +189,8 @@ export function runClaude(opts: {
 
     child.on("close", (code) => {
       clearTimeout(timer);
-      if (timedOut) return resolve({ ok: false, error: `Timed out after ${Math.round(settings.timeoutMs / 60_000)} minutes.` });
-      if (result) return resolve(result);
+      if (timedOut) return resolve(timedOutResult());
+      if (result) return resolve({ ...result, metrics: metrics.metrics });
       const tail = stderr.trim().split("\n").slice(-3).join(" ").slice(0, 500);
       resolve({ ok: false, error: `Claude Code exited (code ${code}) without a result.${tail ? ` ${tail}` : ""}` });
     });

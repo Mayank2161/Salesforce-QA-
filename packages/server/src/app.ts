@@ -5,7 +5,7 @@ import Fastify, { type FastifyInstance } from "fastify";
 import websocket from "@fastify/websocket";
 import { z } from "zod";
 import {
-  NewPersona, PROTOCOL_VERSION, ParseSuiteRequest, RunId, RunRequest, SlugId, StartSuiteRequest, detectOrgFromHostname, myDomainOf, toSlug,
+  NewPersona, PROTOCOL_VERSION, ParseSuiteRequest, RunId, RunRequest, SlugId, StartReviewRequest, StartSuiteRequest, detectOrgFromHostname, myDomainOf, toSlug,
 } from "@sfqa/shared";
 import type { Org, Persona, Run, RunEvent, SalesforceUser } from "@sfqa/shared";
 import type { AgentBridge } from "./agent/bridge.ts";
@@ -14,6 +14,8 @@ import { EVIDENCE_NAME, type QaWorkspace } from "./reports/workspace.ts";
 import { RunStore } from "./runs/store.ts";
 import { SuiteFileError, readRows, toSuite } from "./suites/parse.ts";
 import { SuiteStore } from "./suites/store.ts";
+import { RequirementsFileError, extractRequirements } from "./reviews/extract.ts";
+import type { ReviewService } from "./reviews/service.ts";
 import { SalesforceApiError } from "./salesforce/api.ts";
 import { listConnections } from "./salesforce/session.ts";
 import { bearerToken, isAllowedHost, isAllowedOrigin, redactToken, tokensMatch } from "./api/security.ts";
@@ -38,6 +40,8 @@ export interface AppOptions {
   qa?: QaWorkspace;
   // Uploaded test-case batches.
   suites?: SuiteStore;
+  // Reviews of uploaded test cases against a requirements document (BRD).
+  reviews?: ReviewService;
   logger?: boolean;
 }
 
@@ -49,6 +53,7 @@ const REPORT_CONTENT_TYPES: Record<string, string> = {
   ".jpg": "image/jpeg",
   ".jpeg": "image/jpeg",
   ".txt": "text/plain; charset=utf-8",
+  ".json": "application/json; charset=utf-8",
   ".pdf": "application/pdf",
 };
 
@@ -67,7 +72,8 @@ class HttpError extends Error {
   }
 }
 
-// Evidence files are flat screenshot names (03_save_toast.png) or run.json; anything else is refused.
+// Evidence files are flat screenshot names (03_save_toast.png), API call records (api_02_get_account.json)
+// or run.json; anything else is refused.
 const isEvidenceFile = (file: string) => file === "run.json" || EVIDENCE_NAME.test(file);
 
 // /qa/... uses its own secret path key (report pages and their images can't send headers);
@@ -119,6 +125,7 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
     return {
       executionReport: `${base}/reports/Test_Execution_Report.html`,
       bugReport: `${base}/bugs/Bug_Report.html`,
+      reviewReport: `${base}/reviews/Test_Case_Review.html`,
     };
   });
 
@@ -172,13 +179,18 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
   app.post<{ Params: { orgId: string } }>("/orgs/:orgId/personas", async (req, reply) => {
     const parsed = NewPersona.safeParse(req.body);
     if (!parsed.success) return reply.code(400).send({ error: "invalid_request", issues: parsed.error.issues });
-    const id = toSlug(parsed.data.name);
-    if (!id) return reply.code(400).send({ error: "invalid_persona_name" });
+    const base = toSlug(parsed.data.name);
+    if (!base) return reply.code(400).send({ error: "invalid_persona_name" });
 
     const persona = await updateOrgsConfig(opts.orgsConfigPath, (config) => {
       const org = config.orgs.find((o) => o.id === req.params.orgId);
       if (!org) throw new HttpError(404, { error: "unknown_org", orgId: req.params.orgId });
-      if (org.personas.some((p) => p.id === id)) throw new HttpError(409, { error: "persona_exists", personaId: id });
+      // Several users may share a persona name (two Sales users); only the same user under the
+      // same name is a duplicate. The id stays unique: sales, sales-2, ...
+      const same = org.personas.find((p) => toSlug(p.name) === base && p.username?.toLowerCase() === parsed.data.username.toLowerCase());
+      if (same) throw new HttpError(409, { error: "persona_exists", personaId: same.id });
+      let id = base;
+      for (let n = 2; org.personas.some((p) => p.id === id); n++) id = `${base}-${n}`;
       const created: Persona = { id, ...parsed.data };
       org.personas.push(created);
       return created;
@@ -244,12 +256,15 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
     if (!parsed.success) {
       return reply.code(400).send({ error: "invalid_request", issues: parsed.error.issues });
     }
-    const { orgId, personaId } = parsed.data;
+    const { orgId, personaId, extraPersonaIds = [] } = parsed.data;
     const { orgs } = await loadOrgsConfig(opts.orgsConfigPath);
     const org = orgs.find((o) => o.id === orgId);
     if (!org) return reply.code(404).send({ error: "unknown_org", orgId });
-    if (!org.personas.some((p) => p.id === personaId)) {
-      return reply.code(404).send({ error: "unknown_persona", orgId, personaId });
+    for (const id of [personaId, ...extraPersonaIds]) {
+      if (!org.personas.some((p) => p.id === id)) return reply.code(404).send({ error: "unknown_persona", orgId, personaId: id });
+    }
+    if (new Set([personaId, ...extraPersonaIds]).size !== extraPersonaIds.length + 1) {
+      return reply.code(400).send({ error: "duplicate_persona", message: "Each persona may appear only once in a test." });
     }
     const run = store.create(parsed.data);
     opts.onRunCreated?.(run);
@@ -286,18 +301,26 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
     if (missing.length) {
       return reply.code(400).send({ error: "persona_required", message: `Choose a default persona for: ${missing.join(", ")}` });
     }
+    const unknownExtra = cases.filter((c) => (c.extraPersonaIds ?? []).some((id) => !org.personas.some((p) => p.id === id))).map((c) => c.tcId);
+    if (unknownExtra.length) {
+      return reply.code(400).send({ error: "unknown_persona", message: `Unknown persona in: ${unknownExtra.join(", ")}` });
+    }
 
     const suiteId = suites.create(orgId, fileName, []);
     const items = cases.map((c) => {
       const persona = personaOf(c.personaId)!;
+      // The primary persona never repeats as an extra one (it may be the default persona).
+      const extra = [...new Set(c.extraPersonaIds ?? [])].filter((id) => id !== persona.id);
       const run = store.create({
         orgId,
         personaId: persona.id,
+        ...(extra.length && { extraPersonaIds: extra }),
         testCase: { title: `${c.tcId} - ${c.title}`.slice(0, 200), body: c.body },
         suiteId,
       });
       opts.onRunCreated?.(run);
-      return { tcId: c.tcId, title: c.title, ...(c.module && { module: c.module }), personaId: persona.id, personaName: persona.name, runId: run.id };
+      const names = [persona, ...extra.map((id) => org.personas.find((p) => p.id === id)!)].map((p) => p.name).join(" + ");
+      return { tcId: c.tcId, title: c.title, ...(c.module && { module: c.module }), personaId: persona.id, personaName: names, runId: run.id };
     });
     suites.setItems(suiteId, items);
     return reply.code(202).send(suites.get(suiteId));
@@ -313,6 +336,33 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
     if (!suites.get(req.params.id)) return reply.code(404).send({ error: "suite_not_found" });
     const cancelled = suites.cancel(req.params.id);
     return { cancelled, suite: suites.get(req.params.id) };
+  });
+
+  // --- Test case review against a requirements document ----------------------------
+  // Claude reads the BRD / requirement sheet and the uploaded test cases and judges each case;
+  // nothing runs in Salesforce. Returns immediately; poll GET /reviews/:id for progress.
+
+  // base64 of a 10 MB document plus up to 200 test cases.
+  app.post("/reviews", { bodyLimit: 20 * 1024 * 1024 }, async (req, reply) => {
+    if (!opts.reviews) return reply.code(501).send({ error: "reviews_not_available" });
+    const parsed = StartReviewRequest.safeParse(req.body);
+    if (!parsed.success) return reply.code(400).send({ error: "invalid_request", issues: parsed.error.issues });
+    const org = await findOrg(parsed.data.orgId);
+    if (opts.reviews.busy()) return reply.code(409).send({ error: "review_in_progress", message: "A review is already running. Wait for it to finish." });
+    let requirements;
+    try {
+      requirements = await extractRequirements(parsed.data.requirements.fileName, Buffer.from(parsed.data.requirements.data, "base64"));
+    } catch (err) {
+      if (err instanceof RequirementsFileError) return reply.code(422).send({ error: "invalid_requirements_file", message: err.message });
+      throw err;
+    }
+    return reply.code(202).send(await opts.reviews.start(org, parsed.data, requirements));
+  });
+
+  app.get<{ Params: { id: string } }>("/reviews/:id", async (req, reply) => {
+    const review = opts.reviews?.get(req.params.id);
+    if (!review) return reply.code(404).send({ error: "review_not_found" });
+    return review;
   });
 
   app.get("/runs", async () => ({ runs: store.list() }));

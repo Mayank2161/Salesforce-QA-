@@ -1,0 +1,12 @@
+{
+  "apis": [
+    {
+      "name": "erp-sandbox",
+      "description": "ERP test system that receives Accounts synced from Salesforce",
+      "baseUrl": "https://erp-sandbox.example.com/api/v1",
+      "headers": { "Authorization": "Bearer ${ERP_SANDBOX_TOKEN}" },
+      "allowWrite": false,
+      "orgs": ["drive-energy-4828-tmcdev"]
+    }
+  ]
+}

@@ -8,3 +8,4 @@ export * from "./events.ts";
 export * from "./session.ts";
 export * from "./salesforce-host.ts";
 export * from "./suite.ts";
+export * from "./review.ts";

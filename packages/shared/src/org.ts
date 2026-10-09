@@ -18,7 +18,14 @@ export const Persona = z.object({
 });
 export type Persona = z.infer<typeof Persona>;
 
-// Body of POST /orgs/:orgId/personas. The id is derived from the name.
+// Display name of a persona. Several users can share a persona name (two Sales users), so the user's
+// name is added when another persona in the list has the same name: "Sales (Sam Lofts)".
+export function personaLabel(p: Persona, all: readonly Persona[]): string {
+  const shared = all.some((o) => o.id !== p.id && o.name.trim().toLowerCase() === p.name.trim().toLowerCase());
+  return shared && p.userFullName ? `${p.name} (${p.userFullName})` : p.name;
+}
+
+// Body of POST /orgs/:orgId/personas. The id is derived from the name (sales, sales-2, ...).
 export const NewPersona = z.object({
   name: z.string().trim().min(1).max(80),
   username: z.string().trim().min(1).max(200),

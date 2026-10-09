@@ -1,7 +1,7 @@
 import { EventEmitter } from "node:events";
 import { randomUUID } from "node:crypto";
 import { overallVerdict } from "@sfqa/shared";
-import type { BugRef, Run, RunEvent, RunRequest, StepResult, Verdict } from "@sfqa/shared";
+import type { BugRef, Run, RunEvent, RunMetrics, RunRequest, StepResult, Verdict } from "@sfqa/shared";
 
 type Listener = (event: RunEvent) => void;
 
@@ -51,6 +51,10 @@ export class RunStore {
   addBug(id: string, bug: BugRef): void {
     this.#require(id).bugs.push(bug);
     this.#emit({ type: "run.bug", runId: id, bug });
+  }
+
+  setMetrics(id: string, metrics: RunMetrics): void {
+    this.#require(id).metrics = metrics;
   }
 
   log(id: string, level: "info" | "warn" | "error", message: string): void {

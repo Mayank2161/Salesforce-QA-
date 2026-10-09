@@ -1,19 +1,23 @@
-import { access, mkdir, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { Browser } from "playwright";
 import { overallVerdict } from "@sfqa/shared";
-import type { BugRef, Org, Persona, Run, StepResult } from "@sfqa/shared";
+import type { BugRef, Org, Persona, Run, RunMetrics, StepResult } from "@sfqa/shared";
+import { describeApiCall, performApiCall } from "../agent/api-call.ts";
 import type { AgentBridge } from "../agent/bridge.ts";
 import { runClaude, type ClaudeSettings } from "../agent/claude.ts";
+import type { BrowserMcpConfig } from "../agent/browser-mcp.ts";
+import type { SessionMetrics } from "../agent/metrics.ts";
 import { buildPrompt, guessTestCaseId } from "../agent/prompt.ts";
-import type { BugReport, Create, FinishReport, ListTestData, Query, StepReport, Update } from "../agent/protocol.ts";
-import { adminApi } from "../salesforce/api.ts";
+import { API_EVIDENCE, type BugReport, type CallApi, type Create, type FinishReport, type ListTestData, type Query, type StepReport, type Update } from "../agent/protocol.ts";
+import { loadExternalApis } from "../config/apis.ts";
+import { adminApi, sidFromCookies } from "../salesforce/api.ts";
 import { allowedObjectsHint, checkedFields, checkedSoql, compactRows, isAllowedSObject } from "../testdata/rules.ts";
 import { loadOrgsConfig } from "../config/orgs.ts";
 import { EVIDENCE_NAME, reportTimestamp, type QaWorkspace, type TestDataRecord } from "../reports/workspace.ts";
 import { launchBrowser, type BrowserSettings } from "../salesforce/browser.ts";
-import { openAsPersona } from "../salesforce/login-as.ts";
-import { readAdminMeta } from "../salesforce/session.ts";
+import { bannerShowsUser, openAsPersona } from "../salesforce/login-as.ts";
+import { myDomainUrl, readAdminMeta } from "../salesforce/session.ts";
 import type { RunStore } from "./store.ts";
 
 export interface RunnerDeps {
@@ -30,6 +34,12 @@ export interface RunnerDeps {
     serverUrl: string;
     qaMcpScript: string;
     playwrightMcpCli: string;
+    // Hybrid execution: each persona's browser also offers run_steps (generic batched actions).
+    // Off: the plain Playwright MCP browser, one Claude decision per browser action.
+    hybrid?: boolean;
+    browserMcpScript?: string;
+    // config/apis.json: external systems tests may call with call_api.
+    apisConfigPath?: string;
   };
 }
 
@@ -46,18 +56,35 @@ export function createRunner(deps: RunnerDeps): (run: Run) => void {
 // 1. Log in as the persona's Salesforce user (admin session + Login As) in an isolated browser.
 // 2. Hand that session to a Playwright MCP browser and let Claude Code execute the test case.
 // 3. Collect steps/bugs as Claude reports them; write the execution and bug reports.
+// One persona taking part in a run, with its logged-in session handed to its own browser.
+export interface RunPersona {
+  persona: Persona;
+  user: { id: string; name: string; username: string };
+  // Saved session of the logged-in persona (a live login: deleted when the run ends).
+  stateFile: string;
+  // MCP server name of this persona's browser: "playwright" for the first persona, then "playwright_2", ...
+  server: string;
+  // Lightning origin the persona landed on, for org-relative URLs in run_steps.
+  baseUrl?: string;
+}
+
+export const browserServer = (i: number) => (i === 0 ? "playwright" : `playwright_${i + 1}`);
+const personaStateFile = (runDir: string, i: number) => join(runDir, i === 0 ? "persona-state.json" : `persona-state-${i + 1}.json`);
+
 export async function executeRun(runId: string, deps: RunnerDeps): Promise<void> {
   const { store, agent } = deps;
   const run = store.get(runId);
   // A batch row cancelled while waiting is already finished; skip it.
   if (!run || run.status !== "queued") return;
-  const { orgId, personaId } = run.request;
+  const { orgId } = run.request;
+  const personaIds = [run.request.personaId, ...(run.request.extraPersonaIds ?? [])];
   const runDir = join(deps.runsDir, runId);
-  const personaState = join(runDir, "persona-state.json");
   let browser: Browser | undefined;
   let error: string | undefined;
   let finish: FinishReport | undefined;
   let testData: TestDataRecord[] = [];
+  let session: SessionMetrics | undefined;
+  let shotsDirUsed: string | undefined;
 
   store.markRunning(runId);
   try {
@@ -65,54 +92,95 @@ export async function executeRun(runId: string, deps: RunnerDeps): Promise<void>
     const displayId = agent ? await agent.qa.nextRunId() : undefined;
     if (displayId) store.setDisplayId(runId, displayId);
     const shotsDir = displayId && agent ? agent.qa.screenshotsDir(displayId) : runDir;
+    shotsDirUsed = shotsDir;
 
     const { orgs } = await loadOrgsConfig(deps.orgsConfigPath);
     const org = orgs.find((o) => o.id === orgId);
-    const persona = org?.personas.find((p) => p.id === personaId);
-    if (!org || !persona) throw new Error(`Org "${orgId}" / persona "${personaId}" is no longer in config/orgs.json`);
+    const personas = personaIds.map((id) => org?.personas.find((p) => p.id === id));
+    const missing = personaIds.filter((_, i) => !personas[i]);
+    if (!org || missing.length) throw new Error(`Org "${orgId}" / persona "${missing.join(", ") || personaIds[0]}" is no longer in config/orgs.json`);
+    const multi = personas.length > 1;
 
-    // Step 0: authenticate as the persona.
-    const loginStart = now();
-    const session = await openAsPersona({
-      browser: async () => (browser = await launchBrowser(deps.browser)),
-      org,
-      persona,
-      authDir: deps.authDir,
-      log: (m) => store.log(runId, "info", m),
-    });
-    const loginShot = "00_login_as_persona.png";
-    const screenshots: string[] = [];
-    if (session.page) {
-      await session.page.screenshot({ path: join(shotsDir, loginShot) });
-      screenshots.push(loginShot);
+    // Step 0: authenticate as each persona, each in its own isolated browser context (Login As).
+    const sessions: { persona: Persona; session: Extract<Awaited<ReturnType<typeof openAsPersona>>, { ok: true }> }[] = [];
+    for (const [i, persona] of (personas as Persona[]).entries()) {
+      const loginStart = now();
+      const session = await openAsPersona({
+        browser: async () => (browser ??= await launchBrowser(deps.browser)),
+        org,
+        persona,
+        authDir: deps.authDir,
+        log: (m) => store.log(runId, "info", m),
+      });
+      const label = multi ? `0${String.fromCharCode(97 + i)}` : "0";
+      const shot = i === 0 ? "00_login_as_persona.png" : `${label}_login_as_${persona.id}.png`;
+      const screenshots: string[] = [];
+      if (session.page) {
+        await session.page.screenshot({ path: join(shotsDir, shot) });
+        screenshots.push(shot);
+      }
+      store.addStep(runId, {
+        index: 0,
+        label,
+        description: `Log in to ${org.name} as ${persona.name}${persona.userFullName ? ` (${persona.userFullName})` : ""} via Login As`,
+        status: session.ok ? "PASS" : "BLOCKED",
+        actual: session.ok ? `Logged in as ${session.user.name} (${session.user.username})` : session.message,
+        screenshots,
+        startedAt: loginStart,
+        finishedAt: now(),
+      });
+      if (!session.ok) break; // the test cannot run without every persona
+      sessions.push({ persona, session });
     }
-    store.addStep(runId, {
-      index: 0,
-      label: "0",
-      description: `Log in to ${org.name} as ${persona.name}${persona.userFullName ? ` (${persona.userFullName})` : ""} via Login As`,
-      status: session.ok ? "PASS" : "BLOCKED",
-      actual: session.ok ? `Logged in as ${session.user.name} (${session.user.username})` : session.message,
-      screenshots,
-      startedAt: loginStart,
-      finishedAt: now(),
-    });
 
-    if (session.ok && agent && displayId) {
-      // Hand the logged-in session to Claude's browser, then close ours.
-      await session.context.storageState({ path: personaState });
+    // Each Login As starts from the same admin session. Make sure a later login did not end an earlier one.
+    let allLoggedIn = sessions.length === personas.length;
+    if (allLoggedIn && multi) {
+      const checkStart = now();
+      const ended: string[] = [];
+      for (const { persona, session } of sessions.slice(0, -1)) {
+        await session.page.reload({ waitUntil: "domcontentloaded" }).catch(() => undefined);
+        const banner = session.page.getByText(/Logged in as/i).first();
+        const text = await banner.waitFor({ timeout: 30_000 }).then(() => banner.innerText(), () => "");
+        if (!bannerShowsUser(text, session.user)) ended.push(persona.name);
+      }
+      store.addStep(runId, {
+        index: 0,
+        label: "0z",
+        description: `Confirm all ${sessions.length} persona sessions are active at the same time`,
+        status: ended.length ? "BLOCKED" : "PASS",
+        actual: ended.length
+          ? `Salesforce ended the Login As session of ${ended.join(", ")} when the next persona logged in, so this org cannot run several personas at once. Split the test case into one test per persona.`
+          : `All persona sessions are active: ${sessions.map((s) => s.session.user.name).join(", ")}.`,
+        screenshots: [],
+        startedAt: checkStart,
+        finishedAt: now(),
+      });
+      allLoggedIn = ended.length === 0;
+    }
+
+    if (allLoggedIn && agent && displayId) {
+      // Hand each logged-in session to its own browser for Claude, then close ours.
+      const runPersonas: RunPersona[] = [];
+      for (const [i, { persona, session }] of sessions.entries()) {
+        const stateFile = personaStateFile(runDir, i);
+        await session.context.storageState({ path: stateFile });
+        runPersonas.push({ persona, user: session.user, stateFile, server: browserServer(i), baseUrl: new URL(session.page.url()).origin });
+      }
       await browser?.close();
       browser = undefined;
-      const outcome = await runAgent({ deps: { ...deps, agent }, runId, runDir, displayId, shotsDir, org, persona, user: session.user, personaState });
+      const outcome = await runAgent({ deps: { ...deps, agent }, runId, runDir, displayId, shotsDir, org, personas: runPersonas });
       finish = outcome.finish;
       testData = outcome.testData;
-    } else if (session.ok) {
+      session = outcome.metrics;
+    } else if (allLoggedIn) {
       store.log(runId, "info", "Logged in. Test execution by Claude is not configured on this server.");
     }
 
     if (agent && displayId) {
       const admin = await readAdminMeta(deps.authDir, org.id);
       const otherScreenshots = (await readdir(shotsDir).catch(() => [] as string[])).filter((f) => EVIDENCE_NAME.test(f));
-      await agent.qa.appendExecution(executionRecord({ run: store.get(runId)!, displayId, org, persona, finish, adminName: admin.name, otherScreenshots, testData }));
+      await agent.qa.appendExecution(executionRecord({ run: store.get(runId)!, displayId, org, persona: personas[0]!, extraPersonas: personas.slice(1) as Persona[], finish, adminName: admin.name, otherScreenshots, testData }));
       store.log(runId, "info", `Report updated: ${displayId}`);
     }
   } catch (err) {
@@ -120,11 +188,62 @@ export async function executeRun(runId: string, deps: RunnerDeps): Promise<void>
     store.log(runId, "error", error);
   } finally {
     await browser?.close().catch(() => undefined);
-    // The persona session file is a live login; never leave it on disk.
-    await rm(personaState, { force: true }).catch(() => undefined);
+    if (session) {
+      const evidence = (await readdir(shotsDirUsed ?? runDir).catch(() => [] as string[])).filter((f) => /.(png|jpe?g)$/i.test(f));
+      const metrics: RunMetrics = {
+        mode: agent?.hybrid && agent.browserMcpScript ? "hybrid" : "classic",
+        totalMs: Date.now() - new Date(store.get(runId)!.startedAt!).getTime(),
+        ...session,
+        screenshots: evidence.length,
+      };
+      store.setMetrics(runId, metrics);
+      store.log(runId, "info", describeMetrics(metrics));
+    }
+    // Persona session files are live logins; never leave them on disk.
+    for (let i = 0; i < personaIds.length; i++) await rm(personaStateFile(runDir, i), { force: true }).catch(() => undefined);
     store.finish(runId, error, { declared: finish?.status, summary: finish?.actual });
     await writeFile(join(runDir, "run.json"), JSON.stringify(store.get(runId), null, 2)).catch(() => undefined);
   }
+}
+
+// Tool servers for one run: a Playwright browser per persona (each starting from that persona's
+// logged-in session) and the QA tools.
+export function mcpServers(o: {
+  personas: RunPersona[]; runDir: string; browser: BrowserSettings; playwrightMcpCli: string; qaMcpScript: string; serverUrl: string; runId: string; key: string;
+  browserMcpScript?: string;
+}): Record<string, { command: string; args: string[]; env?: Record<string, string> }> {
+  const servers: Record<string, { command: string; args: string[]; env?: Record<string, string> }> = {};
+  o.personas.forEach((p, i) => {
+    const outputDir = join(o.runDir, i === 0 ? "mcp-output" : `mcp-output-${i + 1}`);
+    if (o.browserMcpScript) {
+      const config: BrowserMcpConfig = {
+        channel: o.browser.channel, headless: o.browser.headless, storageState: p.stateFile, outputDir, viewport: { width: 1440, height: 900 },
+        ...(p.baseUrl && { baseUrl: p.baseUrl }),
+        stepsLog: join(o.runDir, i === 0 ? "run-steps.log" : `run-steps-${i + 1}.log`),
+      };
+      servers[p.server] = { command: process.execPath, args: [o.browserMcpScript], env: { SFQA_BROWSER: JSON.stringify(config) } };
+      return;
+    }
+    servers[p.server] = {
+      command: process.execPath,
+      args: [
+        o.playwrightMcpCli,
+        "--browser", o.browser.channel,
+        "--isolated",
+        "--storage-state", p.stateFile,
+        // Page snapshots and console logs (not evidence) stay out of qa/Screenshots.
+        "--output-dir", outputDir,
+        "--viewport-size", "1440,900",
+        ...(o.browser.headless ? ["--headless"] : []),
+      ],
+    };
+  });
+  servers.qa = {
+    command: process.execPath,
+    args: [o.qaMcpScript],
+    env: { SFQA_URL: o.serverUrl, SFQA_RUN_ID: o.runId, SFQA_RUN_KEY: o.key },
+  };
+  return servers;
 }
 
 async function runAgent(ctx: {
@@ -134,13 +253,28 @@ async function runAgent(ctx: {
   displayId: string;
   shotsDir: string;
   org: Org;
-  persona: Persona;
-  user: { id: string; name: string; username: string };
-  personaState: string;
-}): Promise<{ finish?: FinishReport; testData: TestDataRecord[] }> {
-  const { deps, runId, displayId, shotsDir, org, persona } = ctx;
+  personas: RunPersona[];
+}): Promise<{ finish?: FinishReport; testData: TestDataRecord[]; metrics?: SessionMetrics }> {
+  const { deps, runId, displayId, shotsDir, org } = ctx;
+  const { persona, user } = ctx.personas[0]!;
+  const multi = ctx.personas.length > 1;
   const { store, agent } = deps;
   const run = store.get(runId)!;
+  // Persona by name or id, for record_step "persona" and call_api "as".
+  // Id or user name first: two personas of a run may share a persona name (two Sales users).
+  const findPersona = (name: string) => {
+    const key = name.trim().toLowerCase();
+    const byId = ctx.personas.find((p) => [p.persona.id, p.user.name, p.user.username].some((n) => n.toLowerCase() === key));
+    if (byId) return byId;
+    const byName = ctx.personas.filter((p) => p.persona.name.toLowerCase() === key);
+    if (byName.length > 1) throw new Error(`Several personas are named "${name}". Use the user's name instead: ${byName.map((p) => p.user.name).join(", ")}.`);
+    return byName[0];
+  };
+  let apiCalls = 0;
+  const externalApis = await loadExternalApis(agent.apisConfigPath ?? "", org.id).catch((err: Error) => {
+    store.log(runId, "warn", `External APIs not available: ${err.message}`);
+    return [];
+  });
   const testCaseId = guessTestCaseId(run.request.testCase) ?? run.request.testCase.title ?? displayId;
   let finish: FinishReport | undefined;
   let stepIndex = 1;
@@ -164,15 +298,24 @@ async function runAgent(ctx: {
   const key = agent.bridge.open(runId, {
     async step(r: StepReport) {
       // Evidence is mandatory: a step without its screenshot is rejected so Claude takes it and retries.
-      if (r.status !== "N/A") {
-        if (!r.screenshot) throw new Error("Every step needs a screenshot. Call browser_take_screenshot with a filename like \"03_save_toast.png\", then call record_step again with that file name in \"screenshot\".");
-        if (!(await locateScreenshot(r.screenshot))) throw new Error(retake(r.screenshot));
+      const apiFiles = r.apiEvidence ?? [];
+      for (const file of apiFiles) {
+        if (!(await exists(join(shotsDir, file)))) throw new Error(`${file} is not an evidence file of this run. Use the file name call_api returned.`);
       }
-      const shots = r.screenshot && (await locateScreenshot(r.screenshot)) ? [r.screenshot] : [];
+      if (r.status !== "N/A") {
+        if (!r.screenshot && apiFiles.length === 0) throw new Error("Every step needs evidence. Call browser_take_screenshot with a filename like \"03_save_toast.png\" and pass it in \"screenshot\"; for a step checked through call_api, pass the evidence file it returned in \"apiEvidence\". Then call record_step again.");
+        if (r.screenshot && !(await locateScreenshot(r.screenshot))) throw new Error(retake(r.screenshot));
+      }
+      let who: RunPersona | undefined;
+      if (multi && r.persona) {
+        who = findPersona(r.persona);
+        if (!who) throw new Error(`"${r.persona}" is not a persona of this run. Use one of: ${ctx.personas.map((p) => p.persona.name).join(", ")}.`);
+      }
+      const shots = [...(r.screenshot && (await locateScreenshot(r.screenshot)) ? [r.screenshot] : []), ...apiFiles];
       const step: StepResult = {
         index: stepIndex++,
         label: String(r.n),
-        description: r.action,
+        description: who ? `[${who.persona.name}] ${r.action}` : r.action,
         status: r.status,
         actual: r.result,
         screenshots: shots,
@@ -187,10 +330,12 @@ async function runAgent(ctx: {
     async bug(r: BugReport) {
       const screenshots: { file: string; caption: string }[] = [];
       for (const s of r.screenshots) {
-        if (!(await locateScreenshot(s.file))) throw new Error(retake(s.file));
+        if (API_EVIDENCE.test(s.file)) {
+          if (!(await exists(join(shotsDir, s.file)))) throw new Error(`${s.file} is not an evidence file of this run. Use the file name call_api returned.`);
+        } else if (!(await locateScreenshot(s.file))) throw new Error(retake(s.file));
         screenshots.push(s);
       }
-      if (screenshots.length === 0) throw new Error("A bug needs at least one screenshot showing the defect. Add the step's screenshot file name to \"screenshots\" and call report_bug again.");
+      if (screenshots.length === 0) throw new Error("A bug needs at least one screenshot (or call_api evidence file) showing the defect. Add the step's screenshot file name to \"screenshots\" and call report_bug again.");
       const occurrence = { run: displayId, testCase: testCaseId, on: reportTimestamp(), note: "First found." };
       let ref: BugRef;
       if (r.existingBugId) {
@@ -210,7 +355,7 @@ async function runAgent(ctx: {
           type: r.type ?? "Functional",
           environment: org.name,
           reportedOn: occurrence.on,
-          reportedBy: `Claude Code via Playwright MCP (Login As ${ctx.user.name})`,
+          reportedBy: `Claude Code via Playwright MCP (Login As ${ctx.personas.map((p) => p.user.name).join(", ")})`,
           record: r.record ?? "",
           stepsToReproduce: r.stepsToReproduce,
           expected: r.expected,
@@ -253,6 +398,29 @@ async function runAgent(ctx: {
       store.log(runId, "info", `Test data: updated ${r.sobject} ${r.id} (${Object.keys(fields).join(", ")}) - ${r.reason}`);
       return `Updated ${r.sobject} ${r.id}.`;
     },
+    // --- API checks: the org's REST API (as the admin or a persona) or a configured external system ---
+    async api(r: CallApi) {
+      const result = await performApiCall({
+        externalApis,
+        evidenceDir: shotsDir,
+        nextIndex: () => ++apiCalls,
+        salesforce: async (as) => {
+          if (!as || as.trim().toLowerCase() === "admin") {
+            const api = await adminApi(deps.authDir, org);
+            return { baseUrl: api.baseUrl, authorization: api.authorization() };
+          }
+          const p = findPersona(as);
+          if (!p) throw new Error(`"${as}" is not a persona of this run. Use "admin" or one of: ${ctx.personas.map((x) => x.persona.name).join(", ")}.`);
+          const state = JSON.parse(await readFile(p.stateFile, "utf8")) as { cookies: { name: string; value: string; domain: string }[] };
+          const baseUrl = myDomainUrl(org);
+          const sid = sidFromCookies(state.cookies, baseUrl);
+          if (!sid) throw new Error(`No Salesforce session was found for ${p.persona.name}.`);
+          return { baseUrl, authorization: `Bearer ${sid}` };
+        },
+      }, r);
+      store.log(runId, "info", describeApiCall(r, result));
+      return result.message;
+    },
     async finish(r: FinishReport) {
       if (stepIndex === 1) throw new Error("No steps were recorded. Execute the test case steps and call record_step for each before finish_test.");
       if (finish) throw new Error("finish_test was already called. Stop now.");
@@ -262,29 +430,13 @@ async function runAgent(ctx: {
   });
 
   const mcpConfig = join(ctx.runDir, "mcp.json");
-  const mcpOutput = join(ctx.runDir, "mcp-output");
-  await writeFile(mcpConfig, JSON.stringify({
-    mcpServers: {
-      playwright: {
-        command: process.execPath,
-        args: [
-          agent.playwrightMcpCli,
-          "--browser", deps.browser.channel,
-          "--isolated",
-          "--storage-state", ctx.personaState,
-          // Page snapshots and console logs (not evidence) stay out of qa/Screenshots.
-          "--output-dir", mcpOutput,
-          "--viewport-size", "1440,900",
-          ...(deps.browser.headless ? ["--headless"] : []),
-        ],
-      },
-      qa: {
-        command: process.execPath,
-        args: [agent.qaMcpScript],
-        env: { SFQA_URL: agent.serverUrl, SFQA_RUN_ID: runId, SFQA_RUN_KEY: key },
-      },
-    },
-  }, null, 2));
+  const servers = mcpServers({
+    personas: ctx.personas, runDir: ctx.runDir, browser: deps.browser, playwrightMcpCli: agent.playwrightMcpCli,
+    qaMcpScript: agent.qaMcpScript, serverUrl: agent.serverUrl, runId, key,
+    ...(agent.hybrid && agent.browserMcpScript && { browserMcpScript: agent.browserMcpScript }),
+  });
+  let metrics: SessionMetrics | undefined;
+  await writeFile(mcpConfig, JSON.stringify({ mcpServers: servers }, null, 2));
 
   try {
     const knownBugs = (await agent.qa.listBugs())
@@ -295,12 +447,17 @@ async function runAgent(ctx: {
       // Named screenshots are saved relative to the working folder, so this is where they land.
       cwd: shotsDir,
       mcpConfigPath: mcpConfig,
+      allowedTools: Object.keys(servers).map((s) => `mcp__${s}`),
       prompt: buildPrompt({
-        org, persona, user: ctx.user, displayId, testCase: run.request.testCase, knownBugs,
+        org, persona, user, displayId, testCase: run.request.testCase, knownBugs,
         testData: (await agent.qa.listTestData(org.id)).map((t) => ({ sobject: t.sobject, id: t.id, name: t.name, purpose: t.purpose })),
+        ...(multi && { personas: ctx.personas.map((p) => ({ persona: p.persona, user: p.user, server: p.server })) }),
+        apis: externalApis.map((a) => ({ name: a.name, description: a.description, allowWrite: a.allowWrite })),
+        hybrid: Boolean(agent.hybrid && agent.browserMcpScript),
       }),
       onLog: (level, message) => store.log(runId, level, message),
     });
+    metrics = result.metrics;
     if (result.turns) store.log(runId, "info", `Claude finished in ${result.turns} turns${result.durationMs ? ` (${Math.round(result.durationMs / 1000)}s)` : ""}.`);
     if (!result.ok) store.log(runId, "error", result.error ?? "Claude stopped with an error.");
     if (!finish) {
@@ -319,20 +476,33 @@ async function runAgent(ctx: {
   } finally {
     agent.bridge.close(runId);
     await rm(mcpConfig, { force: true }).catch(() => undefined);
-    await rm(mcpOutput, { recursive: true, force: true }).catch(() => undefined);
+    for (let i = 0; i < ctx.personas.length; i++) {
+      await rm(join(ctx.runDir, i === 0 ? "mcp-output" : `mcp-output-${i + 1}`), { recursive: true, force: true }).catch(() => undefined);
+    }
   }
-  return { finish, testData: createdData };
+  return { finish, testData: createdData, metrics };
+}
+
+export function describeMetrics(m: RunMetrics): string {
+  const t = m.tokens;
+  const tokens = t ? `, tokens in ${t.input + t.cacheCreation + t.cacheRead} (cached ${t.cacheRead}) / out ${t.output}` : "";
+  return `Metrics (${m.mode}): ${Math.round(m.totalMs / 1000)}s total, ${m.turns ?? "?"} Claude turns, ${m.browserActions} browser actions` +
+    ` (${m.batches} batches, ${m.batchSteps} batched, ${m.batchFallbacks} fallbacks), ${m.snapshots} snapshots, ${m.screenshots} screenshots` +
+    ` (${m.imagesToClaude} sent to Claude), ${m.fixedWaits} fixed waits (${m.fixedWaitSeconds}s), tool output ${Math.round(m.toolResultChars / 1000)}k chars${tokens}` +
+    `${m.costUsd !== undefined ? `, ~${m.costUsd.toFixed(2)}` : ""}.`;
 }
 
 // Execution record in the RMS QA report format (qa/reports/execution-data.js).
 export function executionRecord(o: {
-  run: Run; displayId: string; org: Org; persona: Persona; finish?: FinishReport; adminName?: string;
+  run: Run; displayId: string; org: Org; persona: Persona; extraPersonas?: Persona[]; finish?: FinishReport; adminName?: string;
   otherScreenshots?: string[]; testData?: TestDataRecord[];
 }) {
   const { run, finish } = o;
   // Same rule the run itself uses, so the report and the panel always agree.
   const verdict = run.verdict ?? overallVerdict(run.steps, finish?.status);
-  const user = o.persona.userFullName ?? o.persona.username ?? "";
+  const all = [o.persona, ...(o.extraPersonas ?? [])];
+  const userOf = (p: Persona) => p.userFullName ?? p.username ?? "";
+  const user = all.map(userOf).filter(Boolean).join(", ");
   return {
     runId: o.displayId,
     testCaseId: finish?.testCaseId ?? guessTestCaseId(run.request.testCase) ?? "",
@@ -340,7 +510,7 @@ export function executionRecord(o: {
     story: finish?.story ?? "",
     title: finish?.title ?? run.request.testCase.title ?? run.request.testCase.body.split("\n")[0]!.slice(0, 120),
     module: finish?.module ?? "",
-    persona: user ? `${o.persona.name} (${user})` : o.persona.name,
+    persona: all.map((p) => (userOf(p) ? `${p.name} (${userOf(p)})` : p.name)).join(" + "),
     type: finish?.type ?? "",
     priority: finish?.priority ?? "",
     environment: o.org.name,
@@ -381,12 +551,10 @@ export async function cleanupStaleRuns(runsDir: string): Promise<number> {
   let removed = 0;
   for (const entry of await readdir(runsDir, { withFileTypes: true }).catch(() => [])) {
     if (!entry.isDirectory()) continue;
-    for (const leftover of ["persona-state.json", "mcp.json", "mcp-output"]) {
-      const path = join(runsDir, entry.name, leftover);
-      if (await access(path).then(() => true, () => false)) {
-        await rm(path, { recursive: true, force: true });
-        removed++;
-      }
+    for (const leftover of await readdir(join(runsDir, entry.name)).catch(() => [] as string[])) {
+      if (!/^(persona-state(-\d+)?\.json|mcp\.json|mcp-output(-\d+)?)$/.test(leftover)) continue;
+      await rm(join(runsDir, entry.name, leftover), { recursive: true, force: true });
+      removed++;
     }
   }
   return removed;
