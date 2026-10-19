@@ -57,6 +57,9 @@ const REPORT_CONTENT_TYPES: Record<string, string> = {
   ".pdf": "application/pdf",
 };
 
+// Keeps the extension's background worker (and so the panel's live connection) awake during quiet runs.
+const HEARTBEAT_MS = 20_000;
+
 const DetectRequest = z.object({ hostname: z.string().min(1).max(253) });
 
 // Salesforce session problems are 409s, never 401: the extension reads 401 as "agent token rejected".
@@ -411,7 +414,11 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
       send(event);
       if (event.type === "run.completed") socket.close(1000);
     });
-    socket.on("close", unsubscribe);
+    const heartbeat = setInterval(() => send({ type: "run.heartbeat", runId: run.id, at: new Date().toISOString() }), HEARTBEAT_MS);
+    socket.on("close", () => {
+      clearInterval(heartbeat);
+      unsubscribe();
+    });
   });
 
   return app;

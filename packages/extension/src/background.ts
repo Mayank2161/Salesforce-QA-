@@ -64,6 +64,8 @@ async function handle(req: BgRequest): Promise<unknown> {
       return json("/reports/links");
     case "getRuns":
       return json("/runs");
+    case "getRun":
+      return json(`/runs/${encodeURIComponent(req.runId)}`);
     case "parseSuite":
       return json("/suites/parse", jsonBody({ orgId: req.orgId, fileName: req.fileName, data: req.data }));
     case "startSuite":

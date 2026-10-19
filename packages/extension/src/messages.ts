@@ -20,6 +20,7 @@ export type BgRequest =
   | { type: "createRun"; request: RunRequest }
   | { type: "getReportLinks" }
   | { type: "getRuns" }
+  | { type: "getRun"; runId: string }
   | { type: "parseSuite"; orgId: string; fileName: string; data: string }
   | { type: "startSuite"; request: StartSuiteRequest }
   | { type: "getSuite"; id: string }
@@ -41,6 +42,7 @@ export interface BgResponses {
   createRun: Run;
   getReportLinks: { executionReport: string; bugReport: string; reviewReport: string };
   getRuns: { runs: Run[] };
+  getRun: Run;
   parseSuite: ParsedSuite;
   startSuite: Suite;
   getSuite: Suite;

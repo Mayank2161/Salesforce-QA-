@@ -7,6 +7,7 @@ import { STYLES } from "./styles.ts";
 const ROOT_ID = "sfqa-agent-root";
 const CONNECT_POLL_MS = 3000;
 const SEARCH_DEBOUNCE_MS = 300;
+const RESULT_POLL_MS = 4000;
 
 let orgs: Org[] = [];
 let connections: Connection[] = [];
@@ -479,18 +480,43 @@ function watchQueue(runId: string): void {
   queueTimer = setInterval(() => void showQueuePosition(runId), 5000);
 }
 
+// The run whose result is still to be shown; cleared once the final record has been rendered.
+let pendingRunId: string | undefined;
+let resultPoll: ReturnType<typeof setInterval> | undefined;
+
 function watchRun(runId: string): void {
   watchQueue(runId);
+  pendingRunId = runId;
+  clearInterval(resultPoll);
   const port = chrome.runtime.connect({ name: RUN_EVENTS_PORT });
   runPort = port;
   port.onMessage.addListener((msg: PortMessage) => {
-    if (msg.kind === "error") addLog("error", msg.error);
-    else onEvent(runId, msg.event);
+    if (msg.kind === "error") return; // the poll below takes over if the connection is gone
+    onEvent(runId, msg.event);
   });
   port.onDisconnect.addListener(() => {
-    if (runPort === port) updateRunButton();
+    if (runPort !== port) return;
+    // Chrome can suspend the background worker mid-run, which drops the live connection. Keep
+    // asking the server until the run is finished, so the result and report links always appear.
+    if (pendingRunId === runId) pollForResult(runId);
+    else updateRunButton();
   });
   port.postMessage({ runId });
+}
+
+function pollForResult(runId: string): void {
+  clearInterval(resultPoll);
+  resultPoll = setInterval(async () => {
+    if (pendingRunId !== runId) return clearInterval(resultPoll);
+    const run = await send({ type: "getRun", runId }).catch(() => undefined);
+    if (!run) return;
+    if (run.status === "completed" || run.status === "error") finishRun(runId, run);
+    else {
+      // Show steps that arrived while the connection was down.
+      setStatus(run.status);
+      if (run.steps.length !== stepsBox.childElementCount) stepsBox.replaceChildren(...run.steps.map((s) => renderStep(runId, s)));
+    }
+  }, RESULT_POLL_MS);
 }
 
 function onEvent(runId: string, event: RunEvent): void {
@@ -527,6 +553,8 @@ function setStatus(status: Run["status"], verdict?: Run["verdict"]): void {
 }
 
 function finishRun(runId: string, run: Run): void {
+  if (pendingRunId === runId) pendingRunId = undefined;
+  clearInterval(resultPoll);
   setStatus(run.status, run.verdict);
   if (run.displayId) runIdText.textContent = run.displayId;
   // Re-render from the final record so a page that connected late still shows every step and bug.

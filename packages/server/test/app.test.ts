@@ -221,6 +221,28 @@ describe("events WebSocket", () => {
     assert.equal(last?.type === "run.completed" && last.run.verdict, "PASS");
   });
 
+  test("sends a heartbeat while the run is quiet, so the extension's connection stays up", async (t) => {
+    t.mock.timers.enable({ apis: ["setInterval"] });
+    const run = store.create(validRun);
+    const events: RunEvent[] = [];
+    let firstMessage!: Promise<void>;
+    let closed!: Promise<void>;
+    await app.injectWS(`/runs/${run.id}/events?token=${TOKEN}`, wsContext, {
+      onInit: (ws) => {
+        closed = new Promise((resolve) => ws.on("close", () => resolve()));
+        firstMessage = new Promise((resolve) => ws.once("message", () => resolve()));
+        ws.on("message", (data) => events.push(JSON.parse(data.toString())));
+      },
+    });
+    await firstMessage;
+    t.mock.timers.tick(20_000);
+    t.mock.timers.tick(20_000);
+    await new Promise((r) => setImmediate(r));
+    assert.deepEqual(events.map((e) => e.type), ["run.status", "run.heartbeat", "run.heartbeat"]);
+    store.finish(run.id);
+    await closed;
+  });
+
   test("rejects handshake without token", async () => {
     const run = store.create(validRun);
     await assert.rejects(app.injectWS(`/runs/${run.id}/events`, wsContext), /401/);

@@ -15,5 +15,8 @@ export const RunEvent = z.discriminatedUnion("type", [
     at: IsoDateTime,
   }),
   z.object({ type: z.literal("run.completed"), runId: RunId, run: Run }),
+  // Sent every few seconds while a run is quiet. Chrome suspends an extension's background worker
+  // (and drops its connection) after about 30 seconds without traffic.
+  z.object({ type: z.literal("run.heartbeat"), runId: RunId, at: IsoDateTime }),
 ]);
 export type RunEvent = z.infer<typeof RunEvent>;
