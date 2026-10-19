@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { IsoDateTime, RunId, SlugId } from "./ids.ts";
 import { DisplayRunId, RunStatus, Verdict } from "./run.ts";
+import { ProjectName } from "./test-case.ts";
 
 // A batch ("suite") of test cases uploaded from an Excel/CSV file. Each case becomes one normal run;
 // runs execute one at a time in upload order through the same runner as a single test.
@@ -48,6 +49,8 @@ export const StartSuiteRequest = z.object({
   fileName: z.string().max(255).optional(),
   // Used for cases without a matched persona.
   defaultPersonaId: SlugId.optional(),
+  // Project folder every row's reports are saved in.
+  project: ProjectName.optional(),
   cases: z.array(z.object({
     tcId: z.string().trim().min(1).max(60),
     title: z.string().max(300),

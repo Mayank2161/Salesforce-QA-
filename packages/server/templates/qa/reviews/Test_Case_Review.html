@@ -1,0 +1,227 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Salesforce QA · Test Case Review</title>
+<link rel="stylesheet" href="../assets/qa-report.css">
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <div>
+      <div class="eyebrow">Salesforce QA</div>
+      <h1>Test Case Review</h1>
+      <div class="sub" id="sub"></div>
+    </div>
+    <nav class="links">
+      <a class="btn" href="../reports/Test_Execution_Report.html">Test Execution Report</a>
+      <button class="btn" id="print" type="button">Print / PDF</button>
+      <button class="btn primary" id="exportCsv" type="button">Export CSV</button>
+    </nav>
+  </header>
+
+  <div class="scope">
+    <select id="pick" aria-label="Review"></select>
+  </div>
+
+  <div id="content"></div>
+</div>
+
+<script src="review-data.js"></script>
+<script src="../assets/qa-status.js"></script>
+<script>
+(function () {
+  var U = QAUI, esc = U.esc, badge = U.badge;
+  var $ = function (id) { return document.getElementById(id); };
+  var reviews = (window.TEST_CASE_REVIEWS || []).slice().reverse(); // newest first
+  var VERDICTS = ["Correct", "Needs update", "Incorrect", "Not traceable", "Not reviewed"];
+  var VERDICT_COLOR = { "Correct": "var(--good)", "Needs update": "var(--warning)", "Incorrect": "var(--critical)", "Not traceable": "var(--neutral)", "Not reviewed": "var(--grid)" };
+  var COVERAGE = ["Fully covered", "Partly covered", "Wrongly tested", "Not covered"];
+  var COVERAGE_COLOR = { "Fully covered": "var(--good)", "Partly covered": "var(--warning)", "Wrongly tested": "var(--serious)", "Not covered": "var(--critical)" };
+  var VERDICT_ORDER = { "Incorrect": 0, "Needs update": 1, "Not traceable": 2, "Not reviewed": 3, "Correct": 4 };
+  var current, openTc = null;
+
+  if (!reviews.length) {
+    $("content").innerHTML = '<section class="panel section"><div class="empty">No reviews yet. In the QA Agent panel, upload test cases, add the BRD or requirement sheet under <strong>Check test cases against requirements</strong> and click <strong>Analyse</strong>.</div></section>';
+    $("pick").hidden = true;
+    $("exportCsv").hidden = true;
+    $("print").hidden = true;
+    return;
+  }
+
+  reviews.forEach(function (r) {
+    var o = document.createElement("option");
+    o.value = r.reviewId;
+    o.textContent = r.reviewId + " · " + r.requirementsFile + " · " + r.createdOn;
+    $("pick").appendChild(o);
+  });
+
+  function coverage(r) {
+    var by = {};
+    r.requirements.forEach(function (q) { by[q.id] = []; });
+    r.cases.forEach(function (c) { (c.requirementIds || []).forEach(function (id) { (by[id] = by[id] || []).push(c); }); });
+    return r.requirements.map(function (q) {
+      var cs = by[q.id] || [];
+      var has = function (v) { return cs.some(function (c) { return c.verdict === v; }); };
+      var status = has("Correct") ? "Fully covered" : has("Needs update") ? "Partly covered" : has("Incorrect") ? "Wrongly tested" : "Not covered";
+      return { req: q, cases: cs, status: status };
+    });
+  }
+
+  function count(list, key, value) { return list.filter(function (x) { return x[key] === value; }).length; }
+  function joinAnd(a) { return a.length < 2 ? a.join("") : a.slice(0, -1).join(", ") + " and " + a[a.length - 1]; }
+
+  function render() {
+    var r = current, cov = coverage(r), n = r.cases.length;
+    var c = {}; VERDICTS.forEach(function (v) { c[v] = count(r.cases, "verdict", v); });
+    var cc = {}; COVERAGE.forEach(function (s) { cc[s] = count(cov, "status", s); });
+    var reviewed = n - c["Not reviewed"];
+    var correctPct = U.pct(c["Correct"], reviewed);
+    var withTests = cc["Fully covered"] + cc["Partly covered"];
+    var covPct = U.pct(withTests, cov.length);
+
+    $("sub").textContent = [r.environment, r.requirementsFile + (r.requirementsPages ? " (" + r.requirementsPages + " pages)" : "") + (r.testCasesFile ? " vs " + r.testCasesFile : ""), "Reviewed " + U.fmtDay(U.day(r.createdOn))].filter(Boolean).join(" · ");
+
+    var v = (c["Incorrect"] === 0 && correctPct >= 80 && covPct >= 90) ? ["good", "✓", "Ready to test"]
+      : (c["Incorrect"] === 0 && correctPct >= 50) ? ["warn", "!", "Minor rework needed"]
+      : ["bad", "✕", "Significant rework needed"];
+    var parts = [];
+    if (c["Correct"]) parts.push(c["Correct"] + " correct");
+    if (c["Needs update"]) parts.push(c["Needs update"] + (c["Needs update"] === 1 ? " needs an update" : " need updates"));
+    if (c["Incorrect"]) parts.push(c["Incorrect"] + " incorrect");
+    if (c["Not traceable"]) parts.push(c["Not traceable"] + " not traceable to any requirement");
+    var facts = n + " test case" + (n === 1 ? "" : "s") + " checked against " + cov.length + " requirement" + (cov.length === 1 ? "" : "s") + ": " + joinAnd(parts) + ". " +
+      withTests + " of " + cov.length + " requirements have a test case" + (cc["Not covered"] ? "; " + cc["Not covered"] + " have none." : ".");
+
+    var html = "";
+    if (r.status === "Incomplete") html += '<div class="pending-banner"><span><strong>Incomplete review.</strong> The agent stopped before finishing; ' + (n - reviewed) + " test case(s) were not reviewed and coverage gaps may be missing.</span></div>";
+
+    html += '<section class="panel section"><div class="summary"><div class="headline">' +
+      '<span class="verdict ' + v[0] + '"><span class="ic" aria-hidden="true">' + v[1] + "</span>" + v[2] + "</span>" +
+      "<p>" + esc(facts) + "</p>" + (r.summary ? '<p style="color:var(--muted);font-size:14px;margin-top:6px">' + esc(r.summary) + "</p>" : "") +
+      '</div><div class="hero"><div class="num">' + (reviewed ? correctPct + "%" : "–") + '</div><div class="lbl">Test cases correct</div></div></div>' +
+      '<div style="margin-top:18px">' + U.stack(VERDICTS.filter(function (x) { return x !== "Not reviewed" || c[x]; }).map(function (x) { return { label: x, count: c[x], color: VERDICT_COLOR[x] }; })) + "</div></section>";
+
+    var tile = function (label, value, color, note) {
+      return '<div class="kpi"><div class="label">' + (color ? '<span class="dot" style="background:' + color + '"></span>' : "") + label + '</div><div class="value">' + value + "</div>" + (note ? '<div class="note">' + note + "</div>" : "") + "</div>";
+    };
+    html += '<section class="kpis">' +
+      tile("Test cases reviewed", reviewed, null, n !== reviewed ? "of " + n + " uploaded" : "") +
+      tile("Need updates", c["Needs update"], "var(--warning)") +
+      tile("Incorrect", c["Incorrect"], "var(--critical)") +
+      tile("Not traceable", c["Not traceable"], "var(--neutral)") +
+      tile("Requirement coverage", covPct + "%", null, withTests + " of " + cov.length + " requirements") +
+      tile("Missing test cases", (r.gaps || []).length, null, "suggested below") + "</section>";
+
+    // Requirement coverage
+    html += '<section class="panel section"><h2>Requirement coverage <span class="hint">does every requirement have a correct test case?</span></h2>' +
+      U.stack(COVERAGE.map(function (s) { return { label: s, count: cc[s], color: COVERAGE_COLOR[s] }; })) +
+      '<div class="table-scroll" style="margin-top:16px"><table><thead><tr><th>Requirement</th><th>Description</th><th>Test cases</th><th>Coverage</th></tr></thead><tbody>' +
+      cov.slice().sort(function (a, b) { return COVERAGE.indexOf(b.status) - COVERAGE.indexOf(a.status); }).map(function (x) {
+        var tcs = x.cases.map(function (t) { return '<a href="#" data-tc="' + esc(t.tcId) + '" title="' + esc(t.verdict) + '">' + esc(t.tcId) + "</a>"; }).join(", ");
+        return '<tr><td class="id" style="white-space:nowrap"><strong>' + esc(x.req.id) + "</strong></td><td>" + esc(x.req.title) +
+          (x.req.source ? '<div class="sub" style="color:var(--muted);font-size:12px">' + esc(x.req.source) + "</div>" : "") + "</td><td>" + (tcs || '<span class="zero">none</span>') +
+          '</td><td><span class="sev"><span class="dot" style="background:' + COVERAGE_COLOR[x.status] + '"></span>' + x.status + "</span></td></tr>";
+      }).join("") + "</tbody></table></div></section>";
+
+    // Missing test cases
+    var gaps = r.gaps || [];
+    html += '<section class="panel section"><h2>Missing test cases <span class="hint">requirements no test case checks, with a suggested test case</span></h2>' +
+      (gaps.length ? gaps.map(function (g, i) {
+        var t = g.suggestedTestCase || {};
+        return '<details class="more"' + (i === 0 ? " open" : "") + "><summary>" + esc(g.requirementIds.join(", ")) + " · " + esc(t.title || g.gap) + '</summary><div class="inner">' +
+          "<p style=\"margin:0 0 10px\">" + esc(g.gap) + "</p>" +
+          '<div class="facts">' + f("Type", t.type) + f("Priority", t.priority) + f("Persona", t.persona) + "</div>" +
+          '<div class="two"><div><h3>Steps</h3><div class="box pre">' + esc(t.steps) + '</div></div><div><h3>Expected result</h3><div class="box pre">' + esc(t.expected) + "</div></div></div></div></details>";
+      }).join("") : '<div class="empty">' + (r.status === "Complete" ? "None: every requirement has at least one test case." : "Not assessed: the review did not finish.") + "</div>") + "</section>";
+
+    // Questions for the business
+    if ((r.risks || []).length) {
+      html += '<section class="panel section"><h2>Questions for the business <span class="hint">ambiguities or contradictions in the requirements</span></h2><ol>' +
+        r.risks.map(function (x) { return '<li style="margin-bottom:6px">' + esc(x) + "</li>"; }).join("") + "</ol></section>";
+    }
+
+    // Test case list
+    html += '<section class="panel section"><div class="list-head"><h2>Test case verdicts</h2><div class="list-tools">' +
+      '<input id="q" type="search" placeholder="Search TC ID, title, requirement…"><select id="fVerdict" aria-label="Verdict"><option value="">All verdicts</option>' +
+      VERDICTS.map(function (x) { return "<option>" + x + "</option>"; }).join("") + '</select></div></div>' +
+      '<div class="list table-scroll"><table><thead><tr><th>Test case</th><th>Title</th><th>Verdict</th><th>Requirements</th><th class="n">Issues</th></tr></thead><tbody id="rows"></tbody></table></div></section>';
+
+    $("content").innerHTML = html;
+    $("q").addEventListener("input", rows);
+    $("fVerdict").addEventListener("input", rows);
+    rows();
+  }
+
+  function f(l, v) { return "<div><span>" + l + "</span>" + esc(v || "–") + "</div>"; }
+
+  function filtered() {
+    var q = $("q").value.toLowerCase(), fv = $("fVerdict").value;
+    return current.cases.filter(function (c) {
+      if (fv && c.verdict !== fv) return false;
+      if (q && [c.tcId, c.title, c.module, (c.requirementIds || []).join(" "), c.summary].join(" ").toLowerCase().indexOf(q) < 0) return false;
+      return true;
+    }).sort(function (a, b) { return (VERDICT_ORDER[a.verdict] ?? 9) - (VERDICT_ORDER[b.verdict] ?? 9); });
+  }
+
+  function detail(c) {
+    var reqs = (c.requirementIds || []).map(function (id) {
+      var q = current.requirements.filter(function (x) { return x.id === id; })[0];
+      return "<li><strong>" + esc(id) + "</strong>" + (q ? ": " + esc(q.title) + (q.detail ? '<div style="color:var(--muted);font-size:12px">' + esc(q.detail) + "</div>" : "") : "") + "</li>";
+    }).join("");
+    var issues = (c.issues || []).map(function (i) { return "<li><strong>" + esc(i.type) + ":</strong> " + esc(i.detail) + "</li>"; }).join("");
+    var suggested = (c.suggestedSteps ? "<h3>Suggested steps</h3><div class=\"box pre\">" + esc(c.suggestedSteps) + "</div>" : "") +
+      (c.suggestedExpected ? "<h3>Suggested expected result</h3><div class=\"box pre\">" + esc(c.suggestedExpected) + "</div>" : "");
+    return (c.summary ? '<div class="box note" style="margin-bottom:14px">' + esc(c.summary) + "</div>" : "") +
+      (issues ? "<h3>Issues</h3><div class=\"box\"><ul style=\"margin:0;padding-left:18px\">" + issues + "</ul></div>" : "") +
+      (reqs ? "<h3>Traced to</h3><div class=\"box\"><ul style=\"margin:0;padding-left:18px\">" + reqs + "</ul></div>" : "") +
+      (suggested ? '<div class="two" style="margin-top:4px"><div>' + suggested + "</div><div><h3>Current test case</h3><div class=\"box pre\">" + esc(c.testCaseText) + "</div></div></div>"
+        : '<details class="more"><summary>Current test case</summary><div class="inner"><div class="box pre">' + esc(c.testCaseText) + "</div></div></details>");
+  }
+
+  function rows() {
+    var list = filtered();
+    if (!list.length) { $("rows").innerHTML = '<tr><td colspan="5" class="empty">No test cases match.</td></tr>'; return; }
+    $("rows").innerHTML = list.map(function (c) {
+      var isOpen = openTc === c.tcId;
+      return '<tr class="row' + (isOpen ? " open" : "") + '" id="tc-' + esc(c.tcId) + '" data-tc="' + esc(c.tcId) + '"><td class="id">' + esc(c.tcId) + '</td><td class="t">' + esc(c.title) +
+        (c.module ? '<div class="sub">' + esc(c.module) + "</div>" : "") + "</td><td>" + badge(c.verdict) + "</td><td>" + (esc((c.requirementIds || []).join(", ")) || '<span class="zero">–</span>') +
+        '</td><td class="n">' + U.num((c.issues || []).length) + "</td></tr>" +
+        (isOpen ? '<tr class="detail"><td colspan="5">' + detail(c) + "</td></tr>" : "");
+    }).join("");
+  }
+
+  $("content").addEventListener("click", function (e) {
+    var link = e.target.closest("a[data-tc]");
+    if (link) {
+      e.preventDefault();
+      openTc = link.dataset.tc; $("q").value = ""; $("fVerdict").value = ""; rows();
+      var row = document.getElementById("tc-" + openTc); if (row) row.scrollIntoView({ block: "center" });
+      return;
+    }
+    if (e.target.closest("tr.detail") || e.target.closest("a")) return;
+    var row2 = e.target.closest("tr.row");
+    if (row2 && row2.dataset.tc) { openTc = openTc === row2.dataset.tc ? null : row2.dataset.tc; rows(); }
+  });
+
+  function select(id) {
+    current = reviews.filter(function (r) { return r.reviewId === id; })[0] || reviews[0];
+    $("pick").value = current.reviewId;
+    openTc = null;
+    render();
+  }
+  $("pick").addEventListener("input", function () { select(this.value); history.replaceState(null, "", "#" + this.value); });
+  $("print").addEventListener("click", function () { window.print(); });
+  $("exportCsv").addEventListener("click", function () {
+    U.csv([["reviewId", "tcId", "title", "module", "verdict", "requirements", "summary", "issues", "suggestedSteps", "suggestedExpected"]].concat(current.cases.map(function (c) {
+      return [current.reviewId, c.tcId, c.title, c.module, c.verdict, (c.requirementIds || []).join(" "), c.summary,
+        (c.issues || []).map(function (i) { return i.type + ": " + i.detail; }).join(" | "), c.suggestedSteps, c.suggestedExpected];
+    })), "test-case-review-" + current.reviewId + ".csv");
+  });
+
+  select(location.hash ? decodeURIComponent(location.hash.slice(1)) : reviews[0].reviewId);
+})();
+</script>
+</body>
+</html>

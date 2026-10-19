@@ -18,4 +18,7 @@ runs/*
 !runs/.gitkeep
 
 # Reports, bugs and screenshots (client data)
-qa/
+/qa/
+
+# Project folders: reports, bugs, screenshots and notes (client data)
+/QA-Workspace/

@@ -1,0 +1,269 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Salesforce QA · Bug Report</title>
+<link rel="stylesheet" href="../assets/qa-report.css">
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <div>
+      <div class="eyebrow">Salesforce QA</div>
+      <h1>Defect Report</h1>
+      <div class="sub" id="sub"></div>
+    </div>
+    <nav class="links">
+      <a class="btn" href="../reports/Test_Execution_Report.html">← Test Execution Report</a>
+      <a class="btn" href="../reviews/Test_Case_Review.html">Test Case Review</a>
+      <button class="btn" id="print" type="button">Print / PDF</button>
+      <button class="btn primary" id="exportCsv" type="button">Export CSV</button>
+    </nav>
+  </header>
+
+  <div class="scope">
+    <select id="fEnv" aria-label="Org"><option value="">All orgs</option></select>
+    <select id="fModule" aria-label="Module"><option value="">All modules</option></select>
+  </div>
+
+  <div id="banner"></div>
+
+  <section class="panel section">
+    <div class="summary">
+      <div class="headline">
+        <span class="verdict" id="verdict"></span>
+        <p id="headline"></p>
+      </div>
+      <div class="hero"><div class="num" id="openCount">–</div><div class="lbl">Open defects</div></div>
+    </div>
+  </section>
+
+  <section class="kpis" id="kpis"></section>
+
+  <div class="grid2">
+    <section class="panel section">
+      <h2>Open defects by severity</h2>
+      <div id="bySeverity"></div>
+    </section>
+    <section class="panel section">
+      <h2>All defects by status</h2>
+      <div id="byStatus"></div>
+    </section>
+  </div>
+
+  <section class="panel section">
+    <h2>Defects by module</h2>
+    <div class="table-scroll"><table>
+      <thead><tr><th>Module</th><th class="n">Critical</th><th class="n">High</th><th class="n">Medium</th><th class="n">Low</th><th class="n">Open total</th><th class="n">Resolved</th></tr></thead>
+      <tbody id="modules"></tbody>
+    </table></div>
+  </section>
+
+  <section class="panel section">
+    <div class="list-head">
+      <h2>Defect list</h2>
+      <div class="list-tools">
+        <input id="q" type="search" placeholder="Search ID, title, test case…">
+        <select id="fSeverity" aria-label="Severity"><option value="">All severities</option><option>Critical</option><option>High</option><option>Medium</option><option>Low</option></select>
+        <select id="fStatus" aria-label="Status"><option value="">All statuses</option></select>
+      </div>
+    </div>
+    <div class="list table-scroll">
+      <table>
+        <thead><tr><th>ID</th><th>Title</th><th>Severity</th><th>Status</th><th>Module</th><th class="n">Age</th><th class="n">Seen</th></tr></thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+  </section>
+</div>
+
+<div class="lightbox" id="lightbox"><img alt=""><div class="cap"></div></div>
+
+<script src="bug-data.js"></script>
+<script src="../assets/qa-status.js"></script>
+<script>
+(function () {
+  var STATUSES = ["Open", "Pending", "In Progress", "Needs Clarification", "Not a Bug", "Duplicate", "Deferred", "Fixed", "Retest", "Closed", "Rejected"];
+  var CLOSED = ["Fixed", "Closed", "Rejected", "Not a Bug", "Duplicate"];
+  var SEVERITIES = ["Critical", "High", "Medium", "Low"];
+  var SEV = { Critical: 0, High: 1, Medium: 2, Low: 3 };
+  var SEV_COLOR = { Critical: "var(--critical)", High: "var(--serious)", Medium: "var(--warning)", Low: "var(--neutral)" };
+  var all = window.BUG_REPORTS || [];
+  var qs = QAStatus.create({
+    storageKey: "qa.bugStatus", records: all, idField: "id", globalName: "BUG_REPORTS", fileName: "bug-data.js",
+    header: "// Bug records. Append one object per bug; the bug report page (Bug_Report.html) reads this file.\n// severity: \"Critical\" | \"High\" | \"Medium\" | \"Low\"\n// status: " + STATUSES.map(function (s) { return '"' + s + '"'; }).join(" | ") + "\n// statusHistory: manual status changes made from the report page.\n// Attachment paths are relative to this bugs/ folder. Each bug keeps its evidence in bugs/<BUG-ID>/."
+  });
+  var U = QAUI, esc = U.esc, badge = U.badge;
+  var $ = function (id) { return document.getElementById(id); };
+  all.forEach(function (b) { if (!b.module) b.module = "Unassigned"; if (!b.environment) b.environment = "Unassigned"; });
+  var isOpen = function (b) { return CLOSED.indexOf(b.status) < 0; };
+  var today = new Date(); today.setHours(0, 0, 0, 0);
+  var ageDays = function (b) { var d = U.day(b.reportedOn); return d ? Math.max(0, Math.round((today - d) / 864e5)) : null; };
+  var openId = location.hash ? decodeURIComponent(location.hash.slice(1)) : null;
+
+  function scoped() {
+    var env = $("fEnv").value, mod = $("fModule").value;
+    return all.filter(function (b) { return (!env || b.environment === env) && (!mod || b.module === mod); });
+  }
+
+  function banner() {
+    $("banner").innerHTML = QAStatus.bannerHtml(qs.pendingCount());
+    if ($("pbSave")) $("pbSave").onclick = function () {
+      qs.saveToFile().then(function (how) {
+        U.flash(how === "saved" ? "Saved to bug-data.js" : "Downloaded bug-data.js — replace the file in qa\\bugs\\");
+        banner();
+      }).catch(function () { U.flash("Save cancelled"); });
+    };
+    if ($("pbDiscard")) $("pbDiscard").onclick = function () {
+      if (confirm("Discard all unsaved status changes?")) { qs.discard(); location.reload(); }
+    };
+  }
+
+  function sevCount(list, s) { return list.filter(function (b) { return b.severity === s; }).length; }
+
+  function summary(list, open) {
+    var envs = U.uniq(list, "environment");
+    var when = U.period(list.map(function (b) { return b.reportedOn; }));
+    $("sub").textContent = [envs.length === 1 ? envs[0] : envs.length + " orgs", when && "Reported " + when, "Generated " + U.fmtDay(new Date())].filter(Boolean).join(" · ");
+    var crit = sevCount(open, "Critical"), high = sevCount(open, "High");
+    var v = !open.length ? ["good", "✓", "No open defects"] : crit ? ["bad", "✕", "Critical defects open"] : high ? ["warn", "!", "High-severity defects open"] : ["good", "✓", "Only minor defects open"];
+    $("verdict").className = "verdict " + v[0];
+    $("verdict").innerHTML = '<span class="ic" aria-hidden="true">' + v[1] + "</span>" + v[2];
+    $("openCount").textContent = open.length;
+    var ages = open.map(ageDays).filter(function (a) { return a != null; });
+    var oldest = ages.length ? Math.max.apply(null, ages) : null;
+    var tcs = {}; open.forEach(function (b) { (b.reproducedIn || [{ testCase: b.linkedTestCase }]).forEach(function (o) { tcs[o.testCase] = 1; }); });
+    var resolved = list.length - open.length;
+    $("headline").textContent = !list.length ? "No defects have been logged in this scope." :
+      list.length + " defect" + (list.length > 1 ? "s" : "") + " logged, " + open.length + " still open and " + resolved + " resolved. " +
+      (open.length ? "Open defects: " + crit + " Critical, " + high + " High, " + sevCount(open, "Medium") + " Medium, " + sevCount(open, "Low") + " Low. " +
+        "They affect " + Object.keys(tcs).length + " test case" + (Object.keys(tcs).length === 1 ? "" : "s") + (oldest != null ? "; the oldest has been open " + oldest + " day" + (oldest === 1 ? "" : "s") + "." : ".") : "");
+  }
+
+  function kpis(list, open) {
+    var t = function (label, value, color, note) {
+      return '<div class="kpi"><div class="label">' + (color ? '<span class="dot" style="background:' + color + '"></span>' : "") + label + '</div><div class="value">' + value + "</div>" + (note ? '<div class="note">' + note + "</div>" : "") + "</div>";
+    };
+    var ages = open.map(ageDays).filter(function (a) { return a != null; });
+    var avg = ages.length ? Math.round(ages.reduce(function (a, b) { return a + b; }, 0) / ages.length) : 0;
+    $("kpis").innerHTML =
+      t("Total logged", list.length) +
+      t("Critical / High open", sevCount(open, "Critical") + sevCount(open, "High"), "var(--critical)") +
+      t("Awaiting clarification", open.filter(function (b) { return b.status === "Needs Clarification" || b.status === "Pending"; }).length, "var(--warning)") +
+      t("Resolved", list.length - open.length, "var(--good)", U.pct(list.length - open.length, list.length) + "% of logged") +
+      t("Average age (open)", ages.length ? avg + "d" : "–", null, "days since reported");
+  }
+
+  function charts(list, open) {
+    $("bySeverity").innerHTML = U.stack(SEVERITIES.map(function (s) { return { label: s, count: sevCount(open, s), color: SEV_COLOR[s] }; }));
+    var st = function (fn) { return list.filter(fn).length; };
+    $("byStatus").innerHTML = U.stack([
+      { label: "Open / In progress", count: st(function (b) { return isOpen(b) && ["Pending", "Needs Clarification", "Deferred"].indexOf(b.status) < 0; }), color: "var(--critical)" },
+      { label: "Awaiting / Deferred", count: st(function (b) { return ["Pending", "Needs Clarification", "Deferred"].indexOf(b.status) >= 0; }), color: "var(--warning)" },
+      { label: "Fixed / Closed", count: st(function (b) { return ["Fixed", "Closed"].indexOf(b.status) >= 0; }), color: "var(--good)" },
+      { label: "Not a bug / Duplicate / Rejected", count: st(function (b) { return ["Not a Bug", "Duplicate", "Rejected"].indexOf(b.status) >= 0; }), color: "var(--neutral)" }
+    ]);
+  }
+
+  function modules(list) {
+    var by = {};
+    list.forEach(function (b) { (by[b.module] = by[b.module] || []).push(b); });
+    var names = Object.keys(by).sort(function (a, b) { return by[b].filter(isOpen).length - by[a].filter(isOpen).length || a.localeCompare(b); });
+    $("modules").innerHTML = names.length ? names.map(function (m) {
+      var open = by[m].filter(isOpen);
+      return "<tr><td><strong>" + esc(m) + "</strong></td>" + SEVERITIES.map(function (s) { return '<td class="n">' + U.num(sevCount(open, s)) + "</td>"; }).join("") +
+        '<td class="n"><strong>' + open.length + '</strong></td><td class="n">' + U.num(by[m].length - open.length) + "</td></tr>";
+    }).join("") : '<tr><td colspan="7" class="empty">No defects.</td></tr>';
+  }
+
+  function filtered() {
+    var q = $("q").value.toLowerCase(), sev = $("fSeverity").value, st = $("fStatus").value;
+    return scoped().filter(function (b) {
+      if (sev && b.severity !== sev) return false;
+      if (st && b.status !== st) return false;
+      if (q && [b.id, b.title, b.linkedTestCase, b.linkedRun, b.actual, b.module].join(" ").toLowerCase().indexOf(q) < 0) return false;
+      return true;
+    }).sort(function (a, b) {
+      return (isOpen(b) - isOpen(a)) || (SEV[a.severity] ?? 9) - (SEV[b.severity] ?? 9) || all.indexOf(b) - all.indexOf(a);
+    });
+  }
+
+  function f(l, v) { return "<div><span>" + l + "</span>" + (v || "–") + "</div>"; }
+  function detail(b) {
+    var occ = b.reproducedIn || [];
+    var att = U.shots(b.attachments);
+    return '<div class="facts">' +
+      f("Linked test case", '<a href="../reports/Test_Execution_Report.html#' + esc(b.linkedRun) + '">' + esc(b.linkedTestCase) + "</a>") +
+      f("Type", esc(b.type)) + f("Priority", esc(b.priority)) + f("Reported", esc(b.reportedOn)) + "</div>" +
+      (b.impact ? '<div class="box note" style="margin-bottom:14px"><strong>Business impact:</strong> ' + esc(b.impact) + "</div>" : "") +
+      (b.note ? '<div class="box note" style="margin-bottom:14px">' + esc(b.note) + "</div>" : "") +
+      '<div class="two"><div><h3>Expected</h3><div class="box">' + esc(b.expected) + '</div></div><div><h3>Actual</h3><div class="box">' + esc(b.actual) + "</div></div></div>" +
+      '<details class="more"><summary>Steps to reproduce (' + (b.stepsToReproduce || []).length + ')</summary><div class="inner"><ol>' + (b.stepsToReproduce || []).map(function (s) { return "<li>" + esc(s) + "</li>"; }).join("") + "</ol></div></details>" +
+      (att ? '<details class="more"><summary>Screenshots &amp; attachments (' + b.attachments.length + ')</summary><div class="inner"><div class="shots">' + att + "</div></div></details>" : "") +
+      (occ.length ? '<details class="more"><summary>Seen in ' + occ.length + " run" + (occ.length > 1 ? "s" : "") + '</summary><div class="inner table-scroll"><table><thead><tr><th>Run</th><th>Test case</th><th>When</th><th>Note</th></tr></thead><tbody>' +
+        occ.map(function (o) { return '<tr><td><a href="../reports/Test_Execution_Report.html#' + esc(o.run) + '">' + esc(o.run) + "</a></td><td>" + esc(o.testCase) + "</td><td>" + esc(o.on) + "</td><td>" + esc(o.note) + "</td></tr>"; }).join("") + "</tbody></table></div></details>" : "") +
+      '<details class="more"><summary>More details</summary><div class="inner"><div class="facts" style="margin:0">' +
+      f("Environment", esc(b.environment)) + f("Record", esc(b.record)) + f("First found in", esc(b.linkedRun)) + f("Reported by", esc(b.reportedBy)) + "</div></div></details>" +
+      QAStatus.historyHtml(b.statusHistory, esc, badge) +
+      QAStatus.editorHtml(b.id, b.status, STATUSES, esc);
+  }
+
+  function render() {
+    var list = filtered();
+    if (!list.length) { $("rows").innerHTML = '<tr><td colspan="7" class="empty">No defects match.</td></tr>'; return; }
+    $("rows").innerHTML = list.map(function (b) {
+      var open = openId === b.id, age = ageDays(b);
+      var edited = (b.statusHistory || []).length ? ' <span class="badge b-edited" title="Status changed manually">edited</span>' : "";
+      return '<tr class="row' + (open ? " open" : "") + '" id="' + esc(b.id) + '" data-id="' + esc(b.id) + '"><td class="id">' + esc(b.id) + '</td><td class="t">' + esc(b.title) +
+        '<div class="sub">' + esc(b.linkedTestCase) + "</div></td>" +
+        '<td><span class="sev"><span class="dot" style="background:' + (SEV_COLOR[b.severity] || "var(--neutral)") + '"></span>' + esc(b.severity) + "</span></td>" +
+        "<td>" + badge(b.status) + edited + "</td><td>" + esc(b.module) + '</td><td class="n">' + (isOpen(b) && age != null ? age + "d" : '<span class="zero">–</span>') +
+        '</td><td class="n">' + ((b.reproducedIn || []).length || 1) + "×</td></tr>" +
+        (open ? '<tr class="detail"><td colspan="7">' + detail(b) + "</td></tr>" : "");
+    }).join("");
+  }
+
+  function refresh() {
+    var list = scoped(), open = list.filter(isOpen);
+    banner(); summary(list, open); kpis(list, open); charts(list, open); modules(list); render();
+  }
+
+  $("rows").addEventListener("click", function (e) {
+    var apply = e.target.closest(".se-apply");
+    if (apply) {
+      var ed = apply.closest(".status-editor");
+      var by = ed.querySelector(".se-by").value.trim();
+      QAStatus.reviewer(by);
+      if (qs.change(ed.dataset.id, ed.querySelector(".se-status").value, ed.querySelector(".se-note").value.trim(), by)) { U.flash("Status updated"); refresh(); }
+      else U.flash("Status is already " + ed.querySelector(".se-status").value);
+      return;
+    }
+    if (e.target.closest("tr.detail") || e.target.closest("a")) return;
+    var row = e.target.closest("tr.row");
+    if (row) { openId = openId === row.dataset.id ? null : row.dataset.id; render(); }
+  });
+  ["fEnv", "fModule"].forEach(function (id) { $(id).addEventListener("input", refresh); });
+  ["q", "fSeverity", "fStatus"].forEach(function (id) { $(id).addEventListener("input", render); });
+  $("print").addEventListener("click", function () { window.print(); });
+  U.lightbox();
+
+  $("exportCsv").addEventListener("click", function () {
+    var cols = ["id", "title", "module", "linkedTestCase", "linkedRun", "severity", "priority", "status", "type", "environment", "reportedOn", "expected", "actual", "impact"];
+    U.csv([cols.concat("ageDays", "occurrences", "lastStatusChange")].concat(filtered().map(function (b) {
+      var h = (b.statusHistory || []).slice(-1)[0];
+      var last = h ? h.from + " -> " + h.to + " (" + h.by + ", " + h.on + ")" + (h.note ? ": " + h.note : "") : "";
+      return cols.map(function (c) { return b[c]; }).concat(ageDays(b), (b.reproducedIn || []).length, last);
+    })), "bug-report.csv");
+  });
+
+  U.fill($("fStatus"), STATUSES);
+  U.fill($("fModule"), U.uniq(all, "module"));
+  U.fill($("fEnv"), U.uniq(all, "environment"));
+  U.pickEnv($("fEnv"));
+  refresh();
+  if (openId && $(openId)) $(openId).scrollIntoView({ block: "center" });
+})();
+</script>
+</body>
+</html>

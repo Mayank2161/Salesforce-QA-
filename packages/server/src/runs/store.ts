@@ -53,6 +53,10 @@ export class RunStore {
     this.#emit({ type: "run.bug", runId: id, bug });
   }
 
+  setReports(id: string, reports: NonNullable<Run["reports"]>): void {
+    this.#require(id).reports = reports;
+  }
+
   setMetrics(id: string, metrics: RunMetrics): void {
     this.#require(id).metrics = metrics;
   }

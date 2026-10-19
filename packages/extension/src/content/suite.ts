@@ -9,6 +9,8 @@ import { createReviewPanel } from "./review.ts";
 
 export interface SuiteContext {
   orgId(): string;
+  // Project folder the batch's reports are saved in (none: the shared reports).
+  project(): string | undefined;
   personas(): Persona[];
   // The persona selected in the main Persona dropdown; used for rows without a matching persona.
   defaultPersona(): Persona | undefined;
@@ -25,6 +27,7 @@ export function createSuitePanel(ctx: SuiteContext): { element: HTMLElement; ref
   let suite: Suite | undefined;
   let poll: ReturnType<typeof setInterval> | undefined;
   const selected = new Set<number>(); // spreadsheet row numbers
+  let batchScope: { orgId: string; project?: string } | undefined;
 
   const fileInput = h("input", { type: "file", accept: ".xlsx,.csv", hidden: true });
   const drop = h("div", { className: "drop", tabIndex: 0 },
@@ -178,6 +181,8 @@ export function createSuitePanel(ctx: SuiteContext): { element: HTMLElement; ref
 
   async function start(cases: SuiteCase[]): Promise<void> {
     const d = ctx.defaultPersona();
+    const project = ctx.project();
+    batchScope = { orgId: ctx.orgId(), ...(project && { project }) };
     try {
       suite = await send({
         type: "startSuite",
@@ -185,6 +190,7 @@ export function createSuitePanel(ctx: SuiteContext): { element: HTMLElement; ref
           orgId: ctx.orgId(),
           ...(parsed?.fileName && { fileName: parsed.fileName }),
           ...(d && { defaultPersonaId: d.id }),
+          ...(project && { project }),
           cases: cases.map((c) => ({
             tcId: c.tcId!,
             title: c.title,
@@ -313,13 +319,16 @@ export function createSuitePanel(ctx: SuiteContext): { element: HTMLElement; ref
     void chrome.storage.local.remove(LAST_SUITE_KEY);
   }
 
+  // Reports of the batch's own project and org (or, after a page reload, the current selection).
+  const linksFor = () => send({ type: "getReportLinks", ...(batchScope ?? { orgId: ctx.orgId(), ...(ctx.project() && { project: ctx.project() }) }) }).catch(() => undefined);
+
   async function openReport(hash: string): Promise<void> {
-    const links = await send({ type: "getReportLinks" }).catch(() => undefined);
+    const links = await linksFor();
     if (links) window.open(`${links.executionReport}${hash}`, "_blank");
   }
 
   async function openBugs(hash: string): Promise<void> {
-    const links = await send({ type: "getReportLinks" }).catch(() => undefined);
+    const links = await linksFor();
     if (links) window.open(`${links.bugReport}${hash}`, "_blank");
   }
 

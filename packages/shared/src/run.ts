@@ -92,6 +92,8 @@ export const Run = z.object({
   startedAt: IsoDateTime.optional(),
   finishedAt: IsoDateTime.optional(),
   metrics: RunMetrics.optional(),
+  // Where this run's reports were saved: a project's org folder. Absent: the shared qa/ folder.
+  reports: z.object({ project: z.string(), folder: z.string() }).optional(),
 });
 export type Run =z.infer<typeof Run>;
 

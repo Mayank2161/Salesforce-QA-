@@ -1,7 +1,7 @@
 import { createHmac } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { extname, join, resolve, sep } from "node:path";
-import Fastify, { type FastifyInstance } from "fastify";
+import Fastify, { type FastifyInstance, type FastifyReply } from "fastify";
 import websocket from "@fastify/websocket";
 import { z } from "zod";
 import {
@@ -11,6 +11,7 @@ import type { Org, Persona, Run, RunEvent, SalesforceUser } from "@sfqa/shared";
 import type { AgentBridge } from "./agent/bridge.ts";
 import { ConfigError, loadOrgsConfig, updateOrgsConfig } from "./config/orgs.ts";
 import { EVIDENCE_NAME, type QaWorkspace } from "./reports/workspace.ts";
+import { PROJECT_SECTIONS, ProjectError, type ProjectStore } from "./projects/store.ts";
 import { RunStore } from "./runs/store.ts";
 import { SuiteFileError, readRows, toSuite } from "./suites/parse.ts";
 import { SuiteStore } from "./suites/store.ts";
@@ -38,6 +39,10 @@ export interface AppOptions {
   bridge?: AgentBridge;
   // The qa/ reports folder, served read-only behind a secret path key.
   qa?: QaWorkspace;
+  // Project folders (QA-Workspace/Projects/<project>/<org>/) for reports and notes.
+  projects?: ProjectStore;
+  // Shows a folder in the computer's file manager (Explorer on Windows).
+  openFolder?: (path: string) => Promise<void>;
   // Uploaded test-case batches.
   suites?: SuiteStore;
   // Reviews of uploaded test cases against a requirements document (BRD).
@@ -55,7 +60,26 @@ const REPORT_CONTENT_TYPES: Record<string, string> = {
   ".txt": "text/plain; charset=utf-8",
   ".json": "application/json; charset=utf-8",
   ".pdf": "application/pdf",
+  ".md": "text/plain; charset=utf-8",
 };
+
+const PROJECT_ERROR_STATUS: Record<ProjectError["code"], number> = {
+  invalid_name: 400, invalid_note: 400, project_exists: 409, folder_exists: 409, unknown_project: 404, unknown_org: 404, unknown_note: 404,
+};
+
+// Serves a file below root, or answers 404. Only known report file types, never anything outside root.
+async function sendBelow(root: string, rel: string, reply: FastifyReply) {
+  const base = resolve(root);
+  const file = resolve(base, rel);
+  const type = REPORT_CONTENT_TYPES[extname(file).toLowerCase()];
+  if (!rel || rel.includes("\0") || !file.startsWith(base + sep) || !type) return reply.code(404).send({ error: "not_found" });
+  try {
+    const data = await readFile(file);
+    return reply.type(type).header("Cache-Control", "no-store").header("X-Content-Type-Options", "nosniff").send(data);
+  } catch {
+    return reply.code(404).send({ error: "not_found" });
+  }
+}
 
 // Keeps the extension's background worker (and so the panel's live connection) awake during quiet runs.
 const HEARTBEAT_MS = 20_000;
@@ -81,7 +105,7 @@ const isEvidenceFile = (file: string) => file === "run.json" || EVIDENCE_NAME.te
 
 // /qa/... uses its own secret path key (report pages and their images can't send headers);
 // /internal/... is authenticated per run by the agent bridge.
-const PUBLIC_ROUTES = new Set(["/health", "/qa/:key/*", "/internal/runs/:id/:kind"]);
+const PUBLIC_ROUTES = new Set(["/health", "/qa/:key/*", "/ws/:key/*", "/internal/runs/:id/:kind"]);
 
 export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
   const store = opts.store ?? new RunStore();
@@ -106,6 +130,7 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
 
   app.setErrorHandler((error, _req, reply) => {
     if (error instanceof HttpError) return reply.code(error.statusCode).send(error.body);
+    if (error instanceof ProjectError) return reply.code(PROJECT_ERROR_STATUS[error.code]).send({ error: error.code, message: error.message });
     if (error instanceof SalesforceApiError) {
       return reply.code(API_ERROR_STATUS[error.code]).send({ error: error.code, message: error.message });
     }
@@ -122,29 +147,92 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
   // Unguessable without the agent token, stable across restarts so bookmarked report links keep working.
   const reportKey = createHmac("sha256", opts.token).update("qa-reports").digest("hex").slice(0, 32);
 
-  app.get("/reports/links", async (req, reply) => {
+  const workspaceKey = createHmac("sha256", opts.token).update("qa-workspace").digest("hex").slice(0, 32);
+
+  // ?project=<name>&orgId=<org>: that project's reports for that org. ?orgId=<org> alone: the shared
+  // qa/ reports, opened filtered to that org so other orgs' runs never mix in.
+  app.get<{ Querystring: { project?: string; orgId?: string } }>("/reports/links", async (req, reply) => {
     if (!opts.qa) return reply.code(501).send({ error: "reports_not_available" });
+    const { project, orgId } = req.query;
+    if (project) {
+      if (!opts.projects || !orgId) return reply.code(400).send({ error: "invalid_request", message: "A project link needs orgId." });
+      const p = await opts.projects.get(project);
+      const org = p.orgs.find((o) => o.orgId === orgId);
+      if (!org) throw new ProjectError("unknown_org", `Project "${p.name}" has no folder for this org yet.`);
+      const base = `http://${req.headers.host}/ws/${workspaceKey}/Projects/${encodeURIComponent(p.name)}/${encodeURIComponent(org.folder)}`;
+      return {
+        executionReport: `${base}/${encodeURIComponent("Test Execution Reports")}/Test_Execution_Report.html`,
+        bugReport: `${base}/${encodeURIComponent("Bug Reports")}/Bug_Report.html`,
+        reviewReport: `http://${req.headers.host}/qa/${reportKey}/reviews/Test_Case_Review.html`,
+        scope: { project: p.name, folder: org.folder },
+      };
+    }
     const base = `http://${req.headers.host}/qa/${reportKey}`;
+    const env = orgId ? (await loadOrgsConfig(opts.orgsConfigPath)).orgs.find((o) => o.id === orgId)?.name : undefined;
+    const q = env ? `?env=${encodeURIComponent(env)}` : "";
     return {
-      executionReport: `${base}/reports/Test_Execution_Report.html`,
-      bugReport: `${base}/bugs/Bug_Report.html`,
+      executionReport: `${base}/reports/Test_Execution_Report.html${q}`,
+      bugReport: `${base}/bugs/Bug_Report.html${q}`,
       reviewReport: `${base}/reviews/Test_Case_Review.html`,
+      ...(env && { scope: { org: env } }),
     };
+  });
+
+  // The project workspace, served read-only behind its own secret path key.
+  app.get<{ Params: { key: string; "*": string } }>("/ws/:key/*", async (req, reply) => {
+    if (!opts.projects || !tokensMatch(req.params.key, workspaceKey)) return reply.code(404).send({ error: "not_found" });
+    return sendBelow(opts.projects.root, decodeURIComponent(req.params["*"] ?? ""), reply);
+  });
+
+  // --- Projects: folders for each project and org, with notes ------------------------------------------
+
+  const projects = () => {
+    if (!opts.projects) throw new HttpError(501, { error: "projects_not_available" });
+    return opts.projects;
+  };
+  const NameBody = z.object({ name: z.string().max(200) });
+  const OrgBody = z.object({ orgId: SlugId, folder: z.string().max(200).optional() });
+  const NoteBody = z.object({ title: z.string().max(500), body: z.string().max(200_000).default("") });
+  const OpenBody = z.object({ orgId: SlugId.optional(), section: z.enum(PROJECT_SECTIONS).optional() });
+  const parse = <T>(schema: z.ZodType<T>, body: unknown): T => {
+    const r = schema.safeParse(body);
+    if (!r.success) throw new HttpError(400, { error: "invalid_request", issues: r.error.issues });
+    return r.data;
+  };
+
+  app.get("/projects", async () => ({ root: projects().root, projects: await projects().list() }));
+
+  app.post("/projects", async (req, reply) => reply.code(201).send(await projects().create(parse(NameBody, req.body).name)));
+
+  // Adds the org's folder to the project (or confirms it is there), creating its three sections.
+  app.post<{ Params: { name: string } }>("/projects/:name/orgs", async (req, reply) => {
+    const { orgId, folder } = parse(OrgBody, req.body);
+    const org = await findOrg(orgId);
+    return reply.code(201).send(await projects().addOrg(req.params.name, org, folder));
+  });
+
+  app.post<{ Params: { name: string } }>("/projects/:name/open", async (req, reply) => {
+    if (!opts.openFolder) return reply.code(501).send({ error: "open_not_available" });
+    const { orgId, section } = parse(OpenBody, req.body ?? {});
+    const path = await projects().folder(req.params.name, orgId, section);
+    await opts.openFolder(path);
+    return { path };
+  });
+
+  type NoteParams = { name: string; orgId: string; id: string };
+  app.get<{ Params: NoteParams }>("/projects/:name/orgs/:orgId/notes", async (req) => ({ notes: await projects().listNotes(req.params.name, req.params.orgId) }));
+  app.post<{ Params: NoteParams }>("/projects/:name/orgs/:orgId/notes", async (req, reply) =>
+    reply.code(201).send(await projects().createNote(req.params.name, req.params.orgId, parse(NoteBody, req.body))));
+  app.put<{ Params: NoteParams }>("/projects/:name/orgs/:orgId/notes/:id", async (req) =>
+    projects().updateNote(req.params.name, req.params.orgId, req.params.id, parse(NoteBody, req.body)));
+  app.delete<{ Params: NoteParams }>("/projects/:name/orgs/:orgId/notes/:id", async (req, reply) => {
+    await projects().deleteNote(req.params.name, req.params.orgId, req.params.id);
+    return reply.code(204).send();
   });
 
   app.get<{ Params: { key: string; "*": string } }>("/qa/:key/*", async (req, reply) => {
     if (!opts.qa || !tokensMatch(req.params.key, reportKey)) return reply.code(404).send({ error: "not_found" });
-    const rel = decodeURIComponent(req.params["*"] ?? "");
-    const root = resolve(opts.qa.root);
-    const file = resolve(root, rel);
-    const type = REPORT_CONTENT_TYPES[extname(file).toLowerCase()];
-    if (!rel || rel.includes("\0") || !file.startsWith(root + sep) || !type) return reply.code(404).send({ error: "not_found" });
-    try {
-      const data = await readFile(file);
-      return reply.type(type).header("Cache-Control", "no-store").header("X-Content-Type-Options", "nosniff").send(data);
-    } catch {
-      return reply.code(404).send({ error: "not_found" });
-    }
+    return sendBelow(opts.qa.root, decodeURIComponent(req.params["*"] ?? ""), reply);
   });
 
   // QA tool calls from a run's Claude process (see agent/qa-mcp.ts).
@@ -295,7 +383,7 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
   app.post("/suites", async (req, reply) => {
     const parsed = StartSuiteRequest.safeParse(req.body);
     if (!parsed.success) return reply.code(400).send({ error: "invalid_request", issues: parsed.error.issues });
-    const { orgId, fileName, defaultPersonaId, cases } = parsed.data;
+    const { orgId, fileName, defaultPersonaId, cases, project } = parsed.data;
     const org = await findOrg(orgId);
     const personaOf = (id?: string) => org.personas.find((p) => p.id === (id ?? defaultPersonaId));
 
@@ -320,6 +408,7 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
         ...(extra.length && { extraPersonaIds: extra }),
         testCase: { title: `${c.tcId} - ${c.title}`.slice(0, 200), body: c.body },
         suiteId,
+        ...(project && { project }),
       });
       opts.onRunCreated?.(run);
       const names = [persona, ...extra.map((id) => org.personas.find((p) => p.id === id)!)].map((p) => p.name).join(" + ");
@@ -381,9 +470,13 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
     if (!RunId.safeParse(id).success || !isEvidenceFile(file)) {
       return reply.code(400).send({ error: "invalid_evidence_path" });
     }
-    // Screenshots live in qa/Screenshots/<RUN-ID>/; run.json stays in runs/<id>/.
-    const displayId = store.get(id)?.displayId;
-    const dir = file !== "run.json" && displayId && opts.qa ? opts.qa.screenshotsDir(displayId) : join(opts.runsDir, id);
+    // Screenshots live in the run's folder (qa/Screenshots/<RUN-ID>/, or the project's
+    // Test Execution Reports/<RUN-ID>/); run.json stays in runs/<id>/.
+    const run = store.get(id);
+    const displayId = run?.displayId;
+    let reportsWs = opts.qa;
+    if (run?.reports && opts.projects) reportsWs = await opts.projects.workspace(run.reports.project, run.request.orgId).catch(() => undefined);
+    const dir = file !== "run.json" && displayId && reportsWs ? reportsWs.screenshotsDir(displayId) : join(opts.runsDir, id);
     try {
       const data = await readFile(join(dir, file));
       const type = file.endsWith(".json") ? "application/json" : file.endsWith(".png") ? "image/png" : "image/jpeg";

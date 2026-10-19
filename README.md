@@ -75,6 +75,30 @@ Claude can call APIs in a test (`call_api`) to check what the UI cannot show:
 
 Each call's request and response are saved as evidence (`api_NN_....json`) next to the screenshots. They are shown in the panel and linked from the execution report, and a step checked through an API uses that file as its evidence instead of a screenshot.
 
+### Projects: folders for reports and notes
+
+The **Project** section of the panel keeps each project's reports apart, per Salesforce org:
+
+```
+QA-Workspace/
+  Projects/
+    RMS/
+      project.json                 (the project's orgs and their folder names)
+      TMCDEV/
+        Test Execution Reports/    Test_Execution_Report.html, execution-data.js, one RUN-…/ folder per run
+        Bug Reports/               Bug_Report.html, bug-data.js, one BUG-…/ folder of evidence per bug
+        Notes/                     one .md file per note
+      UAT/
+        …
+  assets/                          shared styles and scripts of the report pages
+```
+
+- **+ New project** creates `Projects/<name>/`. Selecting a project adds a folder for the org selected above. The folder is named after the org's environment, so `DRIVE-ENERGY-4828 - TMCDEV` becomes `TMCDEV`.
+- **Runs started with a project selected** (single test or Excel/CSV batch) save their execution report, screenshots, bugs and bug evidence in that project's folder for the org the run actually used. Each run has its own `RUN-…` folder with its screenshots and `execution.json`, so nothing is overwritten. Bug numbers start at BUG-001 in each project and org.
+- **Test Execution Reports / Bug Reports** open that folder's reports, so TMCDEV shows only TMCDEV runs and UAT only UAT runs. **Notes** lists, creates, edits and deletes the folder's notes. **Open folder** shows the folder in File Explorer.
+- **No project (shared reports)** works as before: runs are saved in `qa/`, and reports opened from the panel are filtered to the selected org. Runs recorded before projects existed stay in `qa/` unchanged. They are not moved into a project, because their project is unknown. Records without an org show as **Unassigned** in the org filter.
+- All folder work is done by the local agent server; the extension cannot write files itself. Set `QA_WORKSPACE_DIR` in `.env` to keep the workspace elsewhere, for example `D:\QA-Workspace`. Project and folder names may use letters, digits, spaces and `- _ . & ( ) ' +`.
+
 ### How Claude drives the browser (hybrid execution)
 
 Claude reads the test case, decides every action and judges every result. It has two ways to act in the browser:

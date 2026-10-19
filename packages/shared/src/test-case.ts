@@ -8,6 +8,10 @@ export const TestCase = z.object({
 });
 export type TestCase = z.infer<typeof TestCase>;
 
+// Project folder a run's reports are saved in (QA-Workspace/Projects/<project>/<org>/). Without it,
+// reports go to the shared qa/ folder as before.
+export const ProjectName = z.string().trim().min(1).max(60);
+
 // Body of POST /runs.
 export const RunRequest = z.object({
   orgId: SlugId,
@@ -18,5 +22,6 @@ export const RunRequest = z.object({
   testCase: TestCase,
   // Set when the run is one row of an uploaded batch (see suite.ts).
   suiteId: z.string().max(40).optional(),
+  project: ProjectName.optional(),
 });
 export type RunRequest = z.infer<typeof RunRequest>;

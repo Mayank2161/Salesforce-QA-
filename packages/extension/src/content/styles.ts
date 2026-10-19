@@ -92,6 +92,25 @@ select:disabled { background: var(--canvas); color: var(--muted); cursor: defaul
 .user-meta { font-size: 11.5px; color: var(--muted); }
 button[hidden] { display: none; }
 
+/* Project folders and notes */
+.project-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.project-actions .btn { padding: 8px 10px; }
+.project-actions .btn.on { border-color: var(--brand); color: var(--brand); background: var(--brand-soft); }
+.subform .row:first-child { justify-content: space-between; }
+.notes-list { display: flex; flex-direction: column; gap: 6px; max-height: 220px; overflow-y: auto; }
+.note-row {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 2px; text-align: left; cursor: pointer; width: 100%;
+  font: inherit; padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); color: var(--text);
+}
+.note-row:hover { border-color: #b6cdf0; background: var(--brand-soft); }
+.note-title { font-weight: 600; font-size: 13px; }
+.note-meta { font-size: 11.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
+.note-editor { display: flex; flex-direction: column; gap: 8px; border-top: 1px solid var(--border); padding-top: 10px; }
+.note-editor[hidden] { display: none; }
+.note-editor .row { justify-content: flex-end; }
+.note-editor .btn.link.danger { margin-right: auto; margin-left: 0; }
+textarea.note-body { min-height: 120px; font-family: inherit; font-size: 13px; }
+
 /* Single test | Upload file */
 .tabs { display: flex; gap: 4px; padding: 3px; background: var(--canvas); border: 1px solid var(--border); border-radius: 8px; }
 .tab { flex: 1; font: inherit; font-size: 12.5px; font-weight: 600; padding: 7px 10px; border: none; border-radius: 6px; background: none; color: var(--muted); cursor: pointer; }
@@ -163,6 +182,9 @@ button[hidden] { display: none; }
 .btn.link:hover:not(:disabled) { background: none; text-decoration: underline; }
 .btn.link:disabled { background: none; color: #9ca3af; }
 .btn.link.danger { color: var(--err); margin-left: auto; }
+.run-row > .btn.primary { flex: 1; }
+.run-row > .new-test { padding: 10px 14px; font-size: 13px; }
+.links-new { margin-right: auto; }
 
 /* Run result */
 .result { border-top: 1px solid var(--border); padding-top: 14px; display: flex; flex-direction: column; gap: 10px; }

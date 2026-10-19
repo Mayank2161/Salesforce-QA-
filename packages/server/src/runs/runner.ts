@@ -18,6 +18,7 @@ import { EVIDENCE_NAME, reportTimestamp, type QaWorkspace, type TestDataRecord }
 import { launchBrowser, type BrowserSettings } from "../salesforce/browser.ts";
 import { bannerShowsUser, openAsPersona } from "../salesforce/login-as.ts";
 import { myDomainUrl, readAdminMeta } from "../salesforce/session.ts";
+import type { ProjectStore } from "../projects/store.ts";
 import type { RunStore } from "./store.ts";
 
 export interface RunnerDeps {
@@ -38,6 +39,8 @@ export interface RunnerDeps {
     // Off: the plain Playwright MCP browser, one Claude decision per browser action.
     hybrid?: boolean;
     browserMcpScript?: string;
+    // Project folders: a run with a project saves its reports in <project>/<org>/ instead of qa/.
+    projects?: ProjectStore;
     // config/apis.json: external systems tests may call with call_api.
     apisConfigPath?: string;
   };
@@ -85,20 +88,23 @@ export async function executeRun(runId: string, deps: RunnerDeps): Promise<void>
   let testData: TestDataRecord[] = [];
   let session: SessionMetrics | undefined;
   let shotsDirUsed: string | undefined;
+  let reports: QaWorkspace | undefined;
 
   store.markRunning(runId);
   try {
     await mkdir(runDir, { recursive: true });
-    const displayId = agent ? await agent.qa.nextRunId() : undefined;
-    if (displayId) store.setDisplayId(runId, displayId);
-    const shotsDir = displayId && agent ? agent.qa.screenshotsDir(displayId) : runDir;
-    shotsDirUsed = shotsDir;
-
     const { orgs } = await loadOrgsConfig(deps.orgsConfigPath);
     const org = orgs.find((o) => o.id === orgId);
     const personas = personaIds.map((id) => org?.personas.find((p) => p.id === id));
     const missing = personaIds.filter((_, i) => !personas[i]);
     if (!org || missing.length) throw new Error(`Org "${orgId}" / persona "${missing.join(", ") || personaIds[0]}" is no longer in config/orgs.json`);
+
+    // Reports go to the project's folder for this run's actual org, or to the shared qa/ folder.
+    if (agent) reports = await reportsFor(run, org, agent, store, runId);
+    const displayId = reports ? await reports.nextRunId() : undefined;
+    if (displayId) store.setDisplayId(runId, displayId);
+    const shotsDir = displayId && reports ? reports.screenshotsDir(displayId) : runDir;
+    shotsDirUsed = shotsDir;
     const multi = personas.length > 1;
 
     // Step 0: authenticate as each persona, each in its own isolated browser context (Login As).
@@ -169,7 +175,7 @@ export async function executeRun(runId: string, deps: RunnerDeps): Promise<void>
       }
       await browser?.close();
       browser = undefined;
-      const outcome = await runAgent({ deps: { ...deps, agent }, runId, runDir, displayId, shotsDir, org, personas: runPersonas });
+      const outcome = await runAgent({ deps: { ...deps, agent }, reports: reports!, runId, runDir, displayId, shotsDir, org, personas: runPersonas });
       finish = outcome.finish;
       testData = outcome.testData;
       session = outcome.metrics;
@@ -177,11 +183,16 @@ export async function executeRun(runId: string, deps: RunnerDeps): Promise<void>
       store.log(runId, "info", "Logged in. Test execution by Claude is not configured on this server.");
     }
 
-    if (agent && displayId) {
+    if (reports && displayId) {
       const admin = await readAdminMeta(deps.authDir, org.id);
       const otherScreenshots = (await readdir(shotsDir).catch(() => [] as string[])).filter((f) => EVIDENCE_NAME.test(f));
-      await agent.qa.appendExecution(executionRecord({ run: store.get(runId)!, displayId, org, persona: personas[0]!, extraPersonas: personas.slice(1) as Persona[], finish, adminName: admin.name, otherScreenshots, testData }));
-      store.log(runId, "info", `Report updated: ${displayId}`);
+      const target = reports;
+      await target.appendExecution(executionRecord({
+        run: store.get(runId)!, displayId, org, persona: personas[0]!, extraPersonas: personas.slice(1) as Persona[], finish, adminName: admin.name, otherScreenshots, testData,
+        screenshotRef: (file) => target.screenshotRef(displayId, file),
+      }));
+      const where = store.get(runId)?.reports;
+      store.log(runId, "info", `Report updated: ${displayId}${where ? ` (${where.project} / ${where.folder})` : ""}`);
     }
   } catch (err) {
     error = (err as Error).message;
@@ -246,8 +257,22 @@ export function mcpServers(o: {
   return servers;
 }
 
+// The report workspace for a run: its project's folder for the run's org (created on first use), or
+// the shared qa/ folder when the run has no project.
+async function reportsFor(run: Run, org: Org, agent: NonNullable<RunnerDeps["agent"]>, store: RunStore, runId: string): Promise<QaWorkspace> {
+  const name = run.request.project;
+  if (!name) return agent.qa;
+  if (!agent.projects) throw new Error("Project folders are not available on this server.");
+  const entry = await agent.projects.addOrg(name, org);
+  const project = await agent.projects.get(name);
+  store.setReports(runId, { project: project.name, folder: entry.folder });
+  return agent.projects.workspace(project.name, org.id);
+}
+
 async function runAgent(ctx: {
   deps: RunnerDeps & { agent: NonNullable<RunnerDeps["agent"]> };
+  // Where this run's execution and bug reports are saved.
+  reports: QaWorkspace;
   runId: string;
   runDir: string;
   displayId: string;
@@ -255,7 +280,7 @@ async function runAgent(ctx: {
   org: Org;
   personas: RunPersona[];
 }): Promise<{ finish?: FinishReport; testData: TestDataRecord[]; metrics?: SessionMetrics }> {
-  const { deps, runId, displayId, shotsDir, org } = ctx;
+  const { deps, runId, displayId, shotsDir, org, reports } = ctx;
   const { persona, user } = ctx.personas[0]!;
   const multi = ctx.personas.length > 1;
   const { store, agent } = deps;
@@ -339,11 +364,11 @@ async function runAgent(ctx: {
       const occurrence = { run: displayId, testCase: testCaseId, on: reportTimestamp(), note: "First found." };
       let ref: BugRef;
       if (r.existingBugId) {
-        const bug = await agent.qa.addOccurrence(r.existingBugId, { ...occurrence, note: r.actual.slice(0, 300) }, { displayId, screenshots });
+        const bug = await reports.addOccurrence(r.existingBugId, { ...occurrence, note: r.actual.slice(0, 300) }, { displayId, screenshots });
         if (!bug) throw new Error(`${r.existingBugId} does not exist. File it as a new bug instead (omit existingBugId).`);
         ref = { id: bug.id, title: bug.title, severity: bug.severity as BugRef["severity"], reproduced: true };
       } else {
-        const bug = await agent.qa.addBug({
+        const bug = await reports.addBug({
           title: r.title,
           module: r.module ?? "",
           linkedTestCase: testCaseId,
@@ -439,7 +464,7 @@ async function runAgent(ctx: {
   await writeFile(mcpConfig, JSON.stringify({ mcpServers: servers }, null, 2));
 
   try {
-    const knownBugs = (await agent.qa.listBugs())
+    const knownBugs = (await reports.listBugs())
       .filter((b) => b.environment === org.name && !["Fixed", "Closed", "Rejected", "Not a Bug", "Duplicate"].includes(b.status))
       .map((b) => ({ id: b.id, title: b.title, status: b.status }));
     const result = await runClaude({
@@ -496,7 +521,10 @@ export function describeMetrics(m: RunMetrics): string {
 export function executionRecord(o: {
   run: Run; displayId: string; org: Org; persona: Persona; extraPersonas?: Persona[]; finish?: FinishReport; adminName?: string;
   otherScreenshots?: string[]; testData?: TestDataRecord[];
+  // Link to a run file from the report page; defaults to the shared qa/ layout.
+  screenshotRef?: (file: string) => string;
 }) {
+  const ref = o.screenshotRef ?? ((file: string) => `../Screenshots/${o.displayId}/${file}`);
   const { run, finish } = o;
   // Same rule the run itself uses, so the report and the panel always agree.
   const verdict = run.verdict ?? overallVerdict(run.steps, finish?.status);
@@ -527,14 +555,14 @@ export function executionRecord(o: {
     // (for example screenshots taken only for a bug), in file-name order.
     screenshots: [
       ...new Map(run.steps.flatMap((s) => s.screenshots.map((file) => [file, {
-        file: `../Screenshots/${o.displayId}/${file}`,
+        file: ref(file),
         caption: (s.notes ?? `Step ${s.label ?? s.index}: ${s.description}`).slice(0, 120),
       }] as const)).reverse()).values(),
     ].reverse().concat(
       (o.otherScreenshots ?? [])
         .filter((file) => !run.steps.some((s) => s.screenshots.includes(file)))
         .sort()
-        .map((file) => ({ file: `../Screenshots/${o.displayId}/${file}`, caption: file.replace(/\.(png|jpe?g)$/i, "").replace(/^\d+_/, "").replace(/_/g, " ") })),
+        .map((file) => ({ file: ref(file), caption: file.replace(/\.(png|jpe?g)$/i, "").replace(/^\d+_/, "").replace(/_/g, " ") })),
     ),
     bugs: [...new Set(run.bugs.map((b) => b.id))],
     testCaseText: run.request.testCase.body,

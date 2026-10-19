@@ -1,0 +1,308 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Salesforce QA · Test Execution Report</title>
+<link rel="stylesheet" href="../assets/qa-report.css">
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <div>
+      <div class="eyebrow">Salesforce QA</div>
+      <h1>Test Execution Report</h1>
+      <div class="sub" id="sub"></div>
+    </div>
+    <nav class="links">
+      <a class="btn" href="../reviews/Test_Case_Review.html">Test Case Review</a>
+      <a class="btn" href="../bugs/Bug_Report.html">Bug Report →</a>
+      <button class="btn" id="print" type="button">Print / PDF</button>
+      <button class="btn primary" id="exportCsv" type="button">Export CSV</button>
+    </nav>
+  </header>
+
+  <div class="scope">
+    <select id="fEnv" aria-label="Org"><option value="">All orgs</option></select>
+    <select id="fModule" aria-label="Module"><option value="">All modules</option></select>
+    <div class="seg" id="view" role="group" aria-label="Which runs to count">
+      <button type="button" data-v="latest" class="on" title="Count each test case once, by its most recent run">Latest result per test case</button>
+      <button type="button" data-v="all" title="Count every run, including re-runs">All runs</button>
+    </div>
+  </div>
+
+  <div id="banner"></div>
+
+  <section class="panel section">
+    <div class="summary">
+      <div class="headline">
+        <span class="verdict" id="verdict"></span>
+        <p id="headline"></p>
+      </div>
+      <div class="hero"><div class="num" id="rate">–</div><div class="lbl">Pass rate</div></div>
+    </div>
+    <div id="breakdown" style="margin-top:18px"></div>
+  </section>
+
+  <section class="kpis" id="kpis"></section>
+
+  <section class="panel section">
+    <h2>Open defects to watch <span class="hint">highest severity first</span></h2>
+    <div id="topBugs"></div>
+  </section>
+
+  <section class="panel section">
+    <h2>Results by module</h2>
+    <div class="table-scroll"><table>
+      <thead><tr><th>Module</th><th class="n">Tests</th><th class="n">Passed</th><th class="n">Failed</th><th class="n">Blocked</th><th class="n">Other</th><th class="n">Pass rate</th></tr></thead>
+      <tbody id="modules"></tbody>
+    </table></div>
+  </section>
+
+  <section class="panel section">
+    <div class="list-head">
+      <h2 id="listTitle">Test results</h2>
+      <div class="list-tools">
+        <input id="q" type="search" placeholder="Search test case, title, story…">
+        <select id="fStatus" aria-label="Result"><option value="">All results</option></select>
+      </div>
+    </div>
+    <div class="list table-scroll">
+      <table>
+        <thead><tr><th>Test case</th><th>Title</th><th>Module</th><th>Result</th><th class="n">Bugs</th><th>Run date</th></tr></thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+  </section>
+</div>
+
+<div class="lightbox" id="lightbox"><img alt=""><div class="cap"></div></div>
+
+<script src="execution-data.js"></script>
+<script src="../bugs/bug-data.js"></script>
+<script src="../assets/qa-status.js"></script>
+<script>
+(function () {
+  var STATUSES = ["PASS", "FAIL", "BLOCKED", "PENDING", "RETEST", "N/A"];
+  var ORDER = { FAIL: 0, BLOCKED: 1, RETEST: 2, PENDING: 3, "N/A": 4, PASS: 5 };
+  var CLOSED_BUG = ["Fixed", "Closed", "Rejected", "Not a Bug", "Duplicate"];
+  var SEV = { Critical: 0, High: 1, Medium: 2, Low: 3 };
+  var SEV_COLOR = { Critical: "var(--critical)", High: "var(--serious)", Medium: "var(--warning)", Low: "var(--neutral)" };
+  var all = window.TEST_EXECUTIONS || [];
+  var allBugs = window.BUG_REPORTS || [];
+  var qs = QAStatus.create({
+    storageKey: "qa.execStatus", records: all, idField: "runId", globalName: "TEST_EXECUTIONS", fileName: "execution-data.js",
+    header: "// Test execution records. Append one object per run; the report page (Test_Execution_Report.html) reads this file.\n// status: \"PASS\" | \"FAIL\" | \"BLOCKED\" | \"PENDING\" | \"RETEST\" | \"N/A\"   step status: \"PASS\" | \"FAIL\" | \"BLOCKED\" | \"N/A\"\n// statusHistory: manual status changes made from the report page.\n// Screenshot paths are relative to this reports/ folder."
+  });
+  var U = QAUI, esc = U.esc, badge = U.badge;
+  var $ = function (id) { return document.getElementById(id); };
+  // Records with no module or org are shown as "Unassigned" rather than guessed.
+  all.forEach(function (r) { if (!r.module) r.module = "Unassigned"; if (!r.environment) r.environment = "Unassigned"; });
+  allBugs.forEach(function (b) { if (!b.environment) b.environment = "Unassigned"; });
+  var view = "latest", openRun = null;
+
+  // Runs in scope (org + module), counted once per test case in "latest" view.
+  function scoped() {
+    var env = $("fEnv").value, mod = $("fModule").value;
+    var list = all.filter(function (r) { return (!env || r.environment === env) && (!mod || r.module === mod); });
+    if (view === "latest") {
+      var last = {};
+      list.forEach(function (r) { last[r.environment + "|" + r.testCaseId] = r; }); // file order = run order
+      list = list.filter(function (r) { return last[r.environment + "|" + r.testCaseId] === r; });
+    }
+    return list;
+  }
+  function counts(list) {
+    var c = { n: list.length, pass: 0, fail: 0, blocked: 0, other: 0 };
+    list.forEach(function (r) { if (r.status === "PASS") c.pass++; else if (r.status === "FAIL") c.fail++; else if (r.status === "BLOCKED") c.blocked++; else c.other++; });
+    return c;
+  }
+  function openBugs() {
+    var env = $("fEnv").value, mod = $("fModule").value;
+    return allBugs.filter(function (b) { return CLOSED_BUG.indexOf(b.status) < 0 && (!env || b.environment === env) && (!mod || (b.module || "Unassigned") === mod); })
+      .sort(function (a, b) { return (SEV[a.severity] ?? 9) - (SEV[b.severity] ?? 9) || (b.reproducedIn || []).length - (a.reproducedIn || []).length; });
+  }
+
+  function banner() {
+    $("banner").innerHTML = QAStatus.bannerHtml(qs.pendingCount());
+    if ($("pbSave")) $("pbSave").onclick = function () {
+      qs.saveToFile().then(function (how) {
+        U.flash(how === "saved" ? "Saved to execution-data.js" : "Downloaded execution-data.js — replace the file in qa\\reports\\");
+        banner();
+      }).catch(function () { U.flash("Save cancelled"); });
+    };
+    if ($("pbDiscard")) $("pbDiscard").onclick = function () {
+      if (confirm("Discard all unsaved status changes?")) { qs.discard(); location.reload(); }
+    };
+  }
+
+  function summary(list, c, bugs) {
+    var envs = U.uniq(list, "environment");
+    var when = U.period(list.map(function (r) { return r.executedOn; }));
+    $("sub").textContent = [envs.length === 1 ? envs[0] : envs.length + " orgs", when, "Generated " + U.fmtDay(new Date())].filter(Boolean).join(" · ");
+    var rate = U.pct(c.pass, c.n);
+    var critHigh = bugs.filter(function (b) { return b.severity === "Critical" || b.severity === "High"; }).length;
+    var crit = bugs.some(function (b) { return b.severity === "Critical"; });
+    var v = !c.n ? ["warn", "!", "No results yet"]
+      : (rate >= 90 && !c.fail && !critHigh) ? ["good", "✓", "On track"]
+      : (rate >= 70 && !crit) ? ["warn", "!", "At risk"]
+      : ["bad", "✕", "Needs attention"];
+    $("verdict").className = "verdict " + v[0];
+    $("verdict").innerHTML = '<span class="ic" aria-hidden="true">' + v[1] + "</span>" + v[2];
+    $("rate").textContent = c.n ? rate + "%" : "–";
+    var unit = view === "latest" ? "test case" : "test run";
+    var parts = [];
+    if (c.pass) parts.push(c.pass + " passed");
+    if (c.fail) parts.push(c.fail + " failed");
+    if (c.blocked) parts.push(c.blocked + " " + (c.blocked > 1 ? "were" : "was") + " blocked");
+    if (c.other) parts.push(c.other + " still pending or need a retest");
+    var text = !c.n ? "No tests have been executed in this scope yet." :
+      c.n + " " + unit + (c.n > 1 ? "s" : "") + " executed" + (when ? " (" + when + ")" : "") + ": " + joinAnd(parts) + ". " +
+      (bugs.length ? bugs.length + " defect" + (bugs.length > 1 ? "s are" : " is") + " open" + (critHigh ? ", " + critHigh + " of them Critical or High severity." : ", none Critical or High.") : "No open defects.");
+    $("headline").textContent = text;
+  }
+  function joinAnd(a) { return a.length < 2 ? a.join("") : a.slice(0, -1).join(", ") + " and " + a[a.length - 1]; }
+
+  function kpis(c, bugs) {
+    var t = function (label, value, color, note) {
+      return '<div class="kpi"><div class="label">' + (color ? '<span class="dot" style="background:' + color + '"></span>' : "") + label + '</div><div class="value">' + value + "</div>" + (note ? '<div class="note">' + note + "</div>" : "") + "</div>";
+    };
+    var ch = bugs.filter(function (b) { return b.severity === "Critical" || b.severity === "High"; }).length;
+    $("kpis").innerHTML =
+      t(view === "latest" ? "Test cases" : "Test runs", c.n) +
+      t("Passed", c.pass, "var(--good)", U.pct(c.pass, c.n) + "% of total") +
+      t("Failed", c.fail, "var(--critical)", U.pct(c.fail, c.n) + "% of total") +
+      t("Blocked", c.blocked, "var(--warning)", U.pct(c.blocked, c.n) + "% of total") +
+      t("Open defects", bugs.length, null, ch + " Critical / High");
+  }
+
+  function breakdown(c) {
+    $("breakdown").innerHTML = U.stack([
+      { label: "Passed", count: c.pass, color: "var(--good)" },
+      { label: "Failed", count: c.fail, color: "var(--critical)" },
+      { label: "Blocked", count: c.blocked, color: "var(--warning)" },
+      { label: "Pending / Retest", count: c.other, color: "var(--neutral)" }
+    ]);
+  }
+
+  function topBugs(bugs) {
+    $("topBugs").innerHTML = bugs.length ? '<div class="table-scroll"><table><tbody>' + bugs.slice(0, 5).map(function (b) {
+      return '<tr><td style="white-space:nowrap"><a href="../bugs/Bug_Report.html#' + esc(b.id) + '"><strong>' + esc(b.id) + "</strong></a></td><td>" + esc(b.title) +
+        '</td><td><span class="sev"><span class="dot" style="background:' + (SEV_COLOR[b.severity] || "var(--neutral)") + '"></span>' + esc(b.severity) + "</span></td></tr>";
+    }).join("") + "</tbody></table></div>" + (bugs.length > 5 ? '<div style="margin-top:10px"><a href="../bugs/Bug_Report.html">View all ' + bugs.length + " open defects →</a></div>" : "")
+      : '<div class="empty">No open defects. 🎉</div>';
+  }
+
+  function modules(list) {
+    var by = {};
+    list.forEach(function (r) { (by[r.module] = by[r.module] || []).push(r); });
+    var names = Object.keys(by).sort(function (a, b) { return by[b].length - by[a].length || a.localeCompare(b); });
+    $("modules").innerHTML = names.length ? names.map(function (m) {
+      var c = counts(by[m]);
+      return "<tr><td><strong>" + esc(m) + '</strong></td><td class="n">' + c.n + '</td><td class="n">' + U.num(c.pass) + '</td><td class="n">' + U.num(c.fail) + '</td><td class="n">' + U.num(c.blocked) + '</td><td class="n">' + U.num(c.other) + '</td><td class="n">' + U.mini(U.pct(c.pass, c.n)) + "</td></tr>";
+    }).join("") : '<tr><td colspan="7" class="empty">No results.</td></tr>';
+  }
+
+  function filtered(list) {
+    var q = $("q").value.toLowerCase(), s = $("fStatus").value;
+    return list.filter(function (r) {
+      if (s && r.status !== s) return false;
+      if (q && [r.runId, r.testCaseId, r.title, r.remarks, r.module, r.sprint, r.story, r.suite].join(" ").toLowerCase().indexOf(q) < 0) return false;
+      return true;
+    }).sort(function (a, b) { return (ORDER[a.status] ?? 9) - (ORDER[b.status] ?? 9) || all.indexOf(b) - all.indexOf(a); });
+  }
+
+  function f(l, v) { return "<div><span>" + l + "</span>" + (v || "–") + "</div>"; }
+  function detail(r) {
+    var bugs = (r.bugs || []).map(function (b) { return '<a href="../bugs/Bug_Report.html#' + esc(b) + '">' + esc(b) + "</a>"; }).join(", ");
+    var failed = r.steps.filter(function (s) { return s.status !== "PASS"; }).length;
+    var steps = r.steps.map(function (s) { return "<tr><td>" + esc(s.n) + "</td><td>" + esc(s.action) + "</td><td>" + badge(s.status) + "</td><td>" + esc(s.result) + "</td></tr>"; }).join("");
+    var shots = U.shots(r.screenshots);
+    return '<div class="facts">' +
+      f("Story", esc(r.story)) + f("Persona", esc(r.persona)) + f("Type · Priority", esc([r.type, r.priority].filter(Boolean).join(" · "))) +
+      f("Executed on", esc(r.executedOn)) + f("Run ID", esc(r.runId)) + f("Linked defects", bugs) + "</div>" +
+      (r.remarks ? '<div class="box note" style="margin-bottom:14px">' + esc(r.remarks) + "</div>" : "") +
+      '<div class="two"><div><h3>Expected</h3><div class="box">' + esc(r.expected) + '</div></div><div><h3>Actual</h3><div class="box">' + esc(r.actual) + "</div></div></div>" +
+      '<details class="more"><summary>Steps (' + r.steps.length + (failed ? ", " + failed + " not passed" : ", all passed") + ')</summary><div class="inner table-scroll"><table><thead><tr><th>#</th><th>Step</th><th>Result</th><th>Observed</th></tr></thead><tbody>' + steps + "</tbody></table></div></details>" +
+      (shots ? '<details class="more"><summary>Screenshots (' + r.screenshots.length + ')</summary><div class="inner"><div class="shots">' + shots + "</div></div></details>" : "") +
+      '<details class="more"><summary>More details</summary><div class="inner"><div class="facts" style="margin:0">' +
+      f("Sprint", esc(r.sprint)) + f("Environment", esc(r.environment)) + f("Record", esc(r.record)) + f("Executed by", esc(r.executedBy)) +
+      f("Precondition", esc(r.precondition)) + (r.suite ? f("Batch", esc(r.suite)) : "") +
+      ((r.testData || []).length ? f("Test data created", esc(r.testData.map(function (t) { return t.sobject + ": " + t.name + " (" + t.id + ")"; }).join("; "))) : "") +
+      "</div></div></details>" +
+      QAStatus.historyHtml(r.statusHistory, esc, badge) +
+      QAStatus.editorHtml(r.runId, r.status, STATUSES, esc);
+  }
+
+  function render() {
+    var list = filtered(scoped());
+    $("listTitle").textContent = view === "latest" ? "Test results (latest run of each test case)" : "Test results (all runs)";
+    if (!list.length) { $("rows").innerHTML = '<tr><td colspan="6" class="empty">No results match.</td></tr>'; return; }
+    $("rows").innerHTML = list.map(function (r) {
+      var isOpen = openRun === r.runId;
+      var edited = (r.statusHistory || []).length ? ' <span class="badge b-edited" title="Status changed manually">edited</span>' : "";
+      return '<tr class="row' + (isOpen ? " open" : "") + '" id="' + esc(r.runId) + '" data-run="' + esc(r.runId) + '"><td class="id">' + esc(r.testCaseId) + '</td><td class="t">' + esc(r.title) +
+        '<div class="sub">' + esc(view === "all" ? r.runId : r.story || "") + "</div></td><td>" + esc(r.module) + "</td><td>" + badge(r.status) + edited +
+        '</td><td class="n">' + U.num((r.bugs || []).length) + '</td><td style="white-space:nowrap">' + esc(U.fmtDay(U.day(r.executedOn))) + "</td></tr>" +
+        (isOpen ? '<tr class="detail"><td colspan="6">' + detail(r) + "</td></tr>" : "");
+    }).join("");
+  }
+
+  function refresh() {
+    var list = scoped(), c = counts(list), bugs = openBugs();
+    banner(); summary(list, c, bugs); kpis(c, bugs); breakdown(c); topBugs(bugs); modules(list); render();
+  }
+  function setView(v) {
+    view = v;
+    Array.prototype.forEach.call($("view").children, function (b) { b.classList.toggle("on", b.dataset.v === v); });
+  }
+
+  $("rows").addEventListener("click", function (e) {
+    var apply = e.target.closest(".se-apply");
+    if (apply) {
+      var ed = apply.closest(".status-editor");
+      var by = ed.querySelector(".se-by").value.trim();
+      QAStatus.reviewer(by);
+      if (qs.change(ed.dataset.id, ed.querySelector(".se-status").value, ed.querySelector(".se-note").value.trim(), by)) { U.flash("Status updated"); refresh(); }
+      else U.flash("Status is already " + ed.querySelector(".se-status").value);
+      return;
+    }
+    if (e.target.closest("tr.detail") || e.target.closest("a")) return;
+    var row = e.target.closest("tr.row");
+    if (row) { openRun = openRun === row.dataset.run ? null : row.dataset.run; render(); }
+  });
+  $("view").addEventListener("click", function (e) { var b = e.target.closest("button"); if (b) { setView(b.dataset.v); refresh(); } });
+  ["fEnv", "fModule"].forEach(function (id) { $(id).addEventListener("input", refresh); });
+  ["q", "fStatus"].forEach(function (id) { $(id).addEventListener("input", render); });
+  $("print").addEventListener("click", function () { window.print(); });
+  U.lightbox();
+
+  $("exportCsv").addEventListener("click", function () {
+    var cols = ["runId", "sprint", "story", "testCaseId", "title", "module", "type", "priority", "persona", "environment", "executedOn", "status", "remarks", "expected", "actual"];
+    U.csv([cols.concat("bugs", "lastStatusChange")].concat(filtered(scoped()).map(function (r) {
+      var h = (r.statusHistory || []).slice(-1)[0];
+      var last = h ? h.from + " -> " + h.to + " (" + h.by + ", " + h.on + ")" + (h.note ? ": " + h.note : "") : "";
+      return cols.map(function (c) { return r[c]; }).concat((r.bugs || []).join(" "), last);
+    })), "test-executions.csv");
+  });
+
+  U.fill($("fStatus"), STATUSES);
+  U.fill($("fModule"), U.uniq(all, "module"));
+  U.fill($("fEnv"), U.uniq(all, "environment"));
+  U.pickEnv($("fEnv"));
+
+  // Test_Execution_Report.html#RUN-... opens that run; #suite=SUITE-... shows one uploaded batch.
+  if (location.hash) {
+    var target = decodeURIComponent(location.hash.slice(1));
+    if (target.indexOf("suite=") === 0) { $("q").value = target.slice(6); setView("all"); }
+    else {
+      openRun = target;
+      if (scoped().every(function (r) { return r.runId !== target; })) setView("all");
+    }
+  }
+  refresh();
+  if (openRun && $(openRun)) $(openRun).scrollIntoView({ block: "center" });
+})();
+</script>
+</body>
+</html>

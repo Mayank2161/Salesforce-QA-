@@ -3,6 +3,16 @@ import type {
   StartSuiteRequest, Suite,
 } from "@sfqa/shared";
 
+// Project folders on the agent's computer (QA-Workspace/Projects/<project>/<org>/).
+export interface ProjectOrg { orgId: string; folder: string; orgName: string }
+export interface Project { name: string; orgs: ProjectOrg[] }
+export interface Note { id: string; title: string; body: string; updatedOn: string }
+export type ProjectSection = "Test Execution Reports" | "Bug Reports" | "Notes";
+export interface ReportLinks {
+  executionReport: string; bugReport: string; reviewReport: string;
+  scope?: { project: string; folder: string } | { org: string };
+}
+
 // An org's admin connection, plus who connected it.
 export type Connection = OrgConnection & { name?: string; username?: string };
 
@@ -18,7 +28,15 @@ export type BgRequest =
   | { type: "addPersona"; orgId: string; persona: NewPersona }
   | { type: "removePersona"; orgId: string; personaId: string }
   | { type: "createRun"; request: RunRequest }
-  | { type: "getReportLinks" }
+  | { type: "getReportLinks"; project?: string; orgId?: string }
+  | { type: "getProjects" }
+  | { type: "createProject"; name: string }
+  | { type: "addProjectOrg"; project: string; orgId: string }
+  | { type: "openProjectFolder"; project: string; orgId?: string; section?: ProjectSection }
+  | { type: "listNotes"; project: string; orgId: string }
+  | { type: "createNote"; project: string; orgId: string; title: string; body: string }
+  | { type: "updateNote"; project: string; orgId: string; id: string; title: string; body: string }
+  | { type: "deleteNote"; project: string; orgId: string; id: string }
   | { type: "getRuns" }
   | { type: "getRun"; runId: string }
   | { type: "parseSuite"; orgId: string; fileName: string; data: string }
@@ -40,7 +58,15 @@ export interface BgResponses {
   addPersona: Persona;
   removePersona: null;
   createRun: Run;
-  getReportLinks: { executionReport: string; bugReport: string; reviewReport: string };
+  getReportLinks: ReportLinks;
+  getProjects: { root: string; projects: Project[] };
+  createProject: Project;
+  addProjectOrg: ProjectOrg;
+  openProjectFolder: { path: string };
+  listNotes: { notes: Note[] };
+  createNote: Note;
+  updateNote: Note;
+  deleteNote: null;
   getRuns: { runs: Run[] };
   getRun: Run;
   parseSuite: ParsedSuite;

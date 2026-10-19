@@ -1,6 +1,7 @@
 import { personaLabel, type Org, type Persona, type Run, type RunEvent, type SalesforceUser, type StepResult } from "@sfqa/shared";
 import { RUN_EVENTS_PORT, send, type Connection, type PortMessage } from "../messages.ts";
 import { h, logo } from "./dom.ts";
+import { createProjectsPanel } from "./projects.ts";
 import { createSuitePanel } from "./suite.ts";
 import { STYLES } from "./styles.ts";
 
@@ -64,6 +65,8 @@ const selectedExtraPersonas = (): string[] =>
 const titleInput = h("input", { placeholder: "e.g. Sales manager can close an opportunity" });
 const bodyInput = h("textarea", { placeholder: "Paste the test case: steps and expected results" });
 const runButton = h("button", { className: "btn primary block", textContent: "Run test" });
+// Clears the previous test case and its result so the next one can be pasted.
+const newTestButton = h("button", { className: "btn secondary new-test", textContent: "New test case", title: "Clear this test case and its result", hidden: true });
 const result = h("div", { className: "result", hidden: true });
 
 // Single pasted test case (unchanged) or a batch uploaded from Excel/CSV.
@@ -71,11 +74,18 @@ const singleBox = h("div", { className: "mode-box" },
   extraPersonasField,
   h("label", {}, "Title (optional)", titleInput),
   h("label", {}, "Test case", bodyInput),
-  runButton,
+  h("div", { className: "row run-row" }, runButton, newTestButton),
   result,
 );
+// Project folders: where this panel's runs save their reports, plus notes for the project and org.
+const projectsPanel = createProjectsPanel({
+  orgId: () => orgSelect.value,
+  orgName: () => currentOrg()?.name,
+});
+
 const suitePanel = createSuitePanel({
   orgId: () => orgSelect.value,
+  project: () => projectsPanel.project(),
   personas: () => currentOrg()?.personas ?? [],
   defaultPersona: () => currentPersona(),
   canRun: () => {
@@ -120,6 +130,7 @@ const panel = h("div", { className: "panel", hidden: true },
       h("label", {}, "Org", orgSelect, orgHint),
       orgConnRow,
     ),
+    projectsPanel.element,
     section("Run as",
       h("label", {}, "Persona", personaSelect),
       personaHint,
@@ -176,6 +187,7 @@ async function refresh(): Promise<void> {
     orgSelect.value = detectedOrgId ?? (saved.lastOrgId as string | undefined) ?? orgs[0]?.id ?? "";
     renderOrgHint(detected?.created ?? false);
     renderOrg(saved.lastPersonaId as string | undefined);
+    void projectsPanel.refresh();
 
     setAgentStatus("ok", `Connected to agent (${serverUrl})`);
   } catch (err) {
@@ -318,6 +330,7 @@ function renderPersonaHint(): void {
 function updateRunButton(): void {
   const c = currentConnection();
   runButton.disabled = !agentConnected || !c?.connected || Boolean(c.expired) || !currentPersona();
+  updateNewTestButton();
   // Persona, org and connection also decide what the batch view can run.
   if (!suiteBox.hidden) suitePanel.refresh();
 }
@@ -413,6 +426,8 @@ orgSelect.onchange = () => {
   renderOrgHint(false);
   toggleAddPersona(false);
   renderOrg();
+  // The project's folder for the newly selected org (created on first use).
+  void projectsPanel.refresh();
 };
 personaSelect.onchange = () => {
   renderExtraPersonas();
@@ -438,6 +453,7 @@ async function startRun(): Promise<void> {
   }
   runPort?.disconnect();
   runButton.disabled = true;
+  newTestButton.hidden = true;
   for (const box of [stepsBox, bugsBox, linksBox, logBox]) box.replaceChildren();
   runIdText.textContent = "";
   result.replaceChildren(h("div", { className: "status-line" }, statusBadge, statusText, runIdText), stepsBox, bugsBox, linksBox, logBox);
@@ -451,7 +467,8 @@ async function startRun(): Promise<void> {
   try {
     const title = titleInput.value.trim();
     const extraPersonaIds = selectedExtraPersonas();
-    const run = await send({ type: "createRun", request: { orgId, personaId, ...(extraPersonaIds.length && { extraPersonaIds }), testCase: { body, ...(title && { title }) } } });
+    const project = projectsPanel.project();
+    const run = await send({ type: "createRun", request: { orgId, personaId, ...(extraPersonaIds.length && { extraPersonaIds }), testCase: { body, ...(title && { title }) }, ...(project && { project }) } });
     watchRun(run.id);
   } catch (err) {
     result.replaceChildren(h("div", { className: "error-box", textContent: (err as Error).message }));
@@ -459,6 +476,30 @@ async function startRun(): Promise<void> {
   }
 }
 runButton.onclick = () => void startRun();
+
+// Offered once there is something to clear, and never while a run is still in progress.
+function updateNewTestButton(): void {
+  const hasContent = Boolean(titleInput.value.trim() || bodyInput.value.trim()) || !result.hidden;
+  newTestButton.hidden = !hasContent || pendingRunId !== undefined;
+}
+
+function newTestCase(): void {
+  if (pendingRunId !== undefined) return;
+  runPort?.disconnect();
+  runPort = undefined;
+  clearInterval(queueTimer);
+  clearInterval(resultPoll);
+  titleInput.value = "";
+  bodyInput.value = "";
+  for (const box of [...extraPersonasBox.querySelectorAll<HTMLInputElement>("input:checked")]) box.checked = false;
+  result.replaceChildren();
+  result.hidden = true;
+  updateRunButton();
+  bodyInput.focus();
+}
+newTestButton.onclick = newTestCase;
+titleInput.oninput = updateNewTestButton;
+bodyInput.oninput = updateNewTestButton;
 
 // Runs execute one at a time; while this one waits, show how many are ahead and which is running.
 let queueTimer: ReturnType<typeof setInterval> | undefined;
@@ -487,6 +528,7 @@ let resultPoll: ReturnType<typeof setInterval> | undefined;
 function watchRun(runId: string): void {
   watchQueue(runId);
   pendingRunId = runId;
+  updateNewTestButton();
   clearInterval(resultPoll);
   const port = chrome.runtime.connect({ name: RUN_EVENTS_PORT });
   runPort = port;
@@ -564,6 +606,7 @@ function finishRun(runId: string, run: Run): void {
   if (run.summary) addLog("info", `Result: ${run.summary}`);
   if (run.error) addLog("error", run.error);
   if (run.displayId) void showReportLinks(run);
+  else linksBox.replaceChildren(newTestLink());
   updateRunButton();
 }
 
@@ -575,10 +618,15 @@ function addBug(bug: Run["bugs"][number]): void {
   ));
 }
 
+// Same action as the button under the test case, placed where the finished result ends.
+const newTestLink = () => h("button", { className: "btn link links-new", textContent: "+ New test case", onclick: newTestCase });
+
 async function showReportLinks(run: Run): Promise<void> {
   try {
-    const links = await send({ type: "getReportLinks" });
+    // The reports this run was saved in: its project's org folder, or the shared reports for its org.
+    const links = await send({ type: "getReportLinks", orgId: run.request.orgId, ...(run.reports && { project: run.reports.project }) });
     linksBox.replaceChildren(
+      newTestLink(),
       ...(run.bugs.length
         ? [h("button", { className: "btn secondary", textContent: `Bug report (${run.bugs.length})`, onclick: () => window.open(`${links.bugReport}#${run.bugs[0]!.id}`, "_blank") })]
         : []),
@@ -586,6 +634,7 @@ async function showReportLinks(run: Run): Promise<void> {
     );
   } catch {
     // Reports are optional; the panel still shows the full result.
+    linksBox.replaceChildren(newTestLink());
   }
 }
 

@@ -37,6 +37,8 @@ function toBase64(buffer: ArrayBuffer): string {
   return btoa(binary);
 }
 
+const notesPath = (r: { project: string; orgId: string }) => `/projects/${encodeURIComponent(r.project)}/orgs/${encodeURIComponent(r.orgId)}/notes`;
+
 async function handle(req: BgRequest): Promise<unknown> {
   switch (req.type) {
     case "status": {
@@ -60,8 +62,29 @@ async function handle(req: BgRequest): Promise<unknown> {
       return null;
     case "createRun":
       return json("/runs", jsonBody(req.request));
-    case "getReportLinks":
-      return json("/reports/links");
+    case "getReportLinks": {
+      const q = new URLSearchParams();
+      if (req.project) q.set("project", req.project);
+      if (req.orgId) q.set("orgId", req.orgId);
+      return json(`/reports/links${q.size ? `?${q}` : ""}`);
+    }
+    case "getProjects":
+      return json("/projects");
+    case "createProject":
+      return json("/projects", jsonBody({ name: req.name }));
+    case "addProjectOrg":
+      return json(`/projects/${encodeURIComponent(req.project)}/orgs`, jsonBody({ orgId: req.orgId }));
+    case "openProjectFolder":
+      return json(`/projects/${encodeURIComponent(req.project)}/open`, jsonBody({ ...(req.orgId && { orgId: req.orgId }), ...(req.section && { section: req.section }) }));
+    case "listNotes":
+      return json(notesPath(req));
+    case "createNote":
+      return json(notesPath(req), jsonBody({ title: req.title, body: req.body }));
+    case "updateNote":
+      return json(`${notesPath(req)}/${encodeURIComponent(req.id)}`, { ...jsonBody({ title: req.title, body: req.body }), method: "PUT" });
+    case "deleteNote":
+      await api(`${notesPath(req)}/${encodeURIComponent(req.id)}`, { method: "DELETE" });
+      return null;
     case "getRuns":
       return json("/runs");
     case "getRun":
