@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { BugSeverity, ReviewVerdict, StepStatus, Verdict } from "@sfqa/shared";
+import { BugSeverity, CasePriority, CaseType, ReviewVerdict, StepStatus, Verdict } from "@sfqa/shared";
 
 // What Claude reports through the QA tools (record_step, report_bug, finish_test).
 // Shared by the QA MCP server (tool input schemas) and the agent server (validation).
@@ -22,6 +22,13 @@ export const StepReportShape = {
 };
 export const StepReport = z.object(StepReportShape);
 export type StepReport = z.infer<typeof StepReport>;
+
+// record_steps (fast execution): several consecutive steps, each exactly like one record_step.
+export const StepsReportShape = {
+  steps: z.array(StepReport).min(1).max(20).describe("Consecutive steps in test case order, each with its own screenshot"),
+};
+export const StepsReport = z.object(StepsReportShape);
+export type StepsReport = z.infer<typeof StepsReport>;
 
 export const BugReportShape = {
   title: text(200).describe("One-line bug title"),
@@ -164,10 +171,54 @@ export const FinishReviewShape = {
 export const FinishReview = z.object(FinishReviewShape);
 export type FinishReview = z.infer<typeof FinishReview>;
 
-export type ReportKind = "step" | "bug" | "finish" | "query" | "create" | "update" | "testdata" | "api" | "requirements" | "verdict" | "reviewDone";
+// --- Test cases from a Jira story (record_criteria, add_test_cases, finish_generation) ---
+
+const criterionId = z.string().trim().min(1).max(40);
+
+export const CriteriaReportShape = {
+  criteria: z.array(z.object({
+    id: criterionId.describe('"AC1", "AC2", ... for acceptance criteria in story order; "REQ1", ... for other requirements in the description'),
+    text: text(800).describe("The criterion or requirement in the story's words"),
+  })).min(1).max(100),
+};
+export const CriteriaReport = z.object(CriteriaReportShape);
+export type CriteriaReport = z.infer<typeof CriteriaReport>;
+
+export const GeneratedCaseShape = z.object({
+  module: z.string().trim().max(80).describe("Salesforce object or area, e.g. Account, Opportunity"),
+  scenario: text(300).describe("Short scenario title"),
+  description: text(1500).describe("What this case verifies and why"),
+  type: CaseType.describe("Positive, Negative, Boundary, Edge case, Validation, Permission, Data integrity, Integration or Regression"),
+  priority: CasePriority,
+  persona: z.string().trim().max(80).describe("Exact persona name from the list, or the role the story names"),
+  preconditions: z.string().trim().max(3000).describe("State and data that must exist before step 1"),
+  steps: z.array(text(1000)).min(1).max(40).describe("Numbered steps in order, one action each, without the numbers"),
+  testData: z.string().trim().max(3000).describe("Concrete values to use (field values, record names, file names)"),
+  expected: text(3000).describe("Independently verifiable expected result: exact messages, values, states"),
+  criteria: z.array(criterionId).min(1).max(20).describe("Criterion/requirement ids from record_criteria this case verifies"),
+});
+
+export const CasesReportShape = {
+  cases: z.array(GeneratedCaseShape).min(1).max(15),
+};
+export const CasesReport = z.object(CasesReportShape);
+export type CasesReport = z.infer<typeof CasesReport>;
+
+export const FinishGenerationShape = {
+  summary: text(1500).describe("2-4 sentences: what the story changes and how the test cases cover it"),
+  gaps: z.array(text(600)).max(50).default([]).describe("Requirements that cannot be tested as written, or missing information"),
+  assumptions: z.array(text(600)).max(50).default([]).describe("Assumptions made where the story is silent"),
+  questions: z.array(text(600)).max(50).default([]).describe("Questions for the product owner or business analyst"),
+  affectedAreas: z.array(text(300)).max(50).default([]).describe("Related modules, objects, fields, automation, reports or integrations that may be affected"),
+};
+export const FinishGeneration = z.object(FinishGenerationShape);
+export type FinishGeneration = z.infer<typeof FinishGeneration>;
+
+export type ReportKind = "step" | "steps" | "bug" | "finish" | "query" | "create" | "update" | "testdata" | "api" | "requirements" | "verdict" | "reviewDone" | "criteria" | "cases" | "generationDone";
 export const REPORT_SCHEMAS = {
   api: CallApi,
   step: StepReport,
+  steps: StepsReport,
   bug: BugReport,
   finish: FinishReport,
   query: Query,
@@ -177,4 +228,7 @@ export const REPORT_SCHEMAS = {
   requirements: RequirementsReport,
   verdict: VerdictReport,
   reviewDone: FinishReview,
+  criteria: CriteriaReport,
+  cases: CasesReport,
+  generationDone: FinishGeneration,
 } as const;

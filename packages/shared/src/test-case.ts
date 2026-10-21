@@ -23,5 +23,7 @@ export const RunRequest = z.object({
   // Set when the run is one row of an uploaded batch (see suite.ts).
   suiteId: z.string().max(40).optional(),
   project: ProjectName.optional(),
+  // Fast execution for this run (the panel's switch). Absent: the server's FAST_EXECUTION default.
+  fast: z.boolean().optional(),
 });
 export type RunRequest = z.infer<typeof RunRequest>;

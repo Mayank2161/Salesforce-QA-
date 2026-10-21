@@ -11,6 +11,8 @@ export interface SuiteContext {
   orgId(): string;
   // Project folder the batch's reports are saved in (none: the shared reports).
   project(): string | undefined;
+  // The panel's Fast execution switch.
+  fast(): boolean;
   personas(): Persona[];
   // The persona selected in the main Persona dropdown; used for rows without a matching persona.
   defaultPersona(): Persona | undefined;
@@ -22,7 +24,7 @@ const POLL_MS = 3000;
 const MAX_BYTES = 5 * 1024 * 1024;
 const LAST_SUITE_KEY = "lastSuiteId";
 
-export function createSuitePanel(ctx: SuiteContext): { element: HTMLElement; refresh(): void } {
+export function createSuitePanel(ctx: SuiteContext): { element: HTMLElement; refresh(): void; showSuite(id: string, scope: { orgId: string; project?: string }): Promise<void> } {
   let parsed: ParsedSuite | undefined;
   let suite: Suite | undefined;
   let poll: ReturnType<typeof setInterval> | undefined;
@@ -191,6 +193,7 @@ export function createSuitePanel(ctx: SuiteContext): { element: HTMLElement; ref
           ...(parsed?.fileName && { fileName: parsed.fileName }),
           ...(d && { defaultPersonaId: d.id }),
           ...(project && { project }),
+          fast: ctx.fast(),
           cases: cases.map((c) => ({
             tcId: c.tcId!,
             title: c.title,
@@ -350,7 +353,20 @@ export function createSuitePanel(ctx: SuiteContext): { element: HTMLElement; ref
     }
   }
 
-  return { element, refresh: () => void refresh() };
+  // Shows a batch started elsewhere (approved Jira test cases) and follows its progress here.
+  async function showSuite(id: string, scope: { orgId: string; project?: string }): Promise<void> {
+    parsed = undefined;
+    review.element.hidden = true;
+    for (const el of [table, buttons, personaNote]) el.replaceChildren();
+    showMessage("", "");
+    batchScope = scope;
+    suite = await send({ type: "getSuite", id });
+    void chrome.storage.local.set({ [LAST_SUITE_KEY]: id });
+    renderSuite();
+    if (isActive()) watch();
+  }
+
+  return { element, refresh: () => void refresh(), showSuite };
 }
 
 function toBase64(buffer: ArrayBuffer): string {

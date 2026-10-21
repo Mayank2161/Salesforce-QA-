@@ -316,6 +316,10 @@ export class QaWorkspace {
     return join(this.root, "test-data", `${orgId}.json`);
   }
 
+  listExecutions(): Promise<ExecutionRecord[]> {
+    return this.#read<ExecutionRecord>(EXECUTIONS);
+  }
+
   appendExecution(record: ExecutionRecord): Promise<void> {
     return this.#serial(async () => {
       const runs = await this.#read<ExecutionRecord>(EXECUTIONS);

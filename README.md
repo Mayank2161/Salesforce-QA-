@@ -75,6 +75,29 @@ Claude can call APIs in a test (`call_api`) to check what the UI cannot show:
 
 Each call's request and response are saved as evidence (`api_NN_....json`) next to the screenshots. They are shown in the panel and linked from the execution report, and a step checked through an API uses that file as its evidence instead of a screenshot.
 
+### Jira story → test cases
+
+The **Jira story** tab turns a pasted story into test cases. Nothing runs in Salesforce until you start the approved ones.
+
+1. Paste the story (summary, description, acceptance criteria, rules, notes) and optionally its Jira key, then click **Generate test cases**. It takes about a minute.
+2. Claude lists the acceptance criteria and requirements. It then writes test cases where they apply: positive, negative, boundary and edge, validation, permission and persona, data integrity, integration, and regression. Negative cases are favoured. Each case has the Test Case ID, Jira Story ID, Module, Scenario, Description, Type, Priority, Persona, Preconditions, numbered Steps, Test Data and Expected Result, and is linked to the criteria it covers. Duplicate cases are dropped.
+3. Review each case: **Approve**, **Reject**, or **Edit** any field. The coverage panel shows traceability, criteria without a case, gaps, assumptions, questions for the business, and possibly affected areas.
+4. **Export all to Excel** or **Export approved**. The sheet has the Test Cases, Traceability and Notes tabs, plus empty Actual Result, Status and Bug ID columns. The same file can be uploaded again in **Upload file**.
+5. **Run approved (N)** runs only the approved cases, one at a time, through the normal batch runner. It uses the selected project and the Fast execution switch, and the Upload file tab shows the progress.
+
+Generated cases and exports are saved in `<project>/<org>/Test Cases/`, or in `qa/test-cases/` without a project.
+
+### Fast execution switch
+
+The **Fast execution** switch in the panel applies to the runs you start (single tests, uploaded files and approved Jira cases). **Off** runs exactly as before.
+
+**On** changes three things:
+- Claude starts while the persona logs in.
+- Claude records several finished steps in one call. Each step is still its own entry with its own screenshot.
+- Claude is told which records the last run of the same test case used.
+
+Validations, screenshots, negative checks and the PASS/FAIL/BLOCKED rules are the same in both modes. `FAST_EXECUTION=true` in `.env` sets the default for runs that don't say.
+
 ### Projects: folders for reports and notes
 
 The **Project** section of the panel keeps each project's reports apart, per Salesforce org:
@@ -88,6 +111,7 @@ QA-Workspace/
         Test Execution Reports/    Test_Execution_Report.html, execution-data.js, one RUN-…/ folder per run
         Bug Reports/               Bug_Report.html, bug-data.js, one BUG-…/ folder of evidence per bug
         Notes/                     one .md file per note
+        Test Cases/                test cases generated from Jira stories, and their Excel exports
       UAT/
         …
   assets/                          shared styles and scripts of the report pages

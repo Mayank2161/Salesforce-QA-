@@ -9,3 +9,4 @@ export * from "./session.ts";
 export * from "./salesforce-host.ts";
 export * from "./suite.ts";
 export * from "./review.ts";
+export * from "./generation.ts";

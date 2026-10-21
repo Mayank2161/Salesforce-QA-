@@ -15,6 +15,26 @@ export interface PromptContext {
   apis?: { name: string; description?: string; allowWrite: boolean }[];
   // Hybrid execution: the browser also offers run_steps (generic actions performed as one batch).
   hybrid?: boolean;
+  // FAST_EXECUTION: record_steps is available, and the records the last run of this test case used.
+  fast?: boolean;
+  previousRun?: { runId: string; status: string; records: string };
+}
+
+// Fast execution: fewer reporting calls and no repeated data searches. The evidence and status rules
+// do not change.
+function fastSection(ctx: PromptContext): string {
+  if (!ctx.fast) return "";
+  const prev = ctx.previousRun
+    ? `\n- The last run of this test case (${ctx.previousRun.runId}, ${ctx.previousRun.status}) used: ${ctx.previousRun.records}. Check those records first (one query_records, or open them) and reuse them if they still match the preconditions; search or create data only if they do not.`
+    : "";
+  return `
+## Recording efficiently
+- Every step of the test case is its own entry with its own number ("2", "3", never "2-3"), status, observed result and screenshot.
+- record_steps records several consecutive steps in one call. Use it instead of one record_step per step once those steps' results are known. Each entry is checked exactly like record_step: its own screenshot, taken while that step's result was on screen, and its own status and observed result.
+- Record every step before finish_test. Record a FAIL step no later than the report_bug call for it.
+- The browser may take a few seconds to open while the persona's login finishes; that is expected.
+- Recording efficiently never means testing less. When a step fails (for example there is no Edit button), still attempt every later step that can be exercised another way a real user has (inline edit, a quick action, a related list), especially validation and negative checks, and record what happened. A later step is BLOCKED only if no way to perform it exists at all; say exactly why.${prev}
+`;
 }
 
 // How to use run_steps without lowering the bar: Claude still plans each step and judges each result.
@@ -91,13 +111,13 @@ ${data}
 5. After setting up data, reload the page in the browser so it shows the new records.
 6. Mention the records you created or reused in finish_test "remarks" and "record". Mark a step BLOCKED for missing data only if the data could not be created after trying.
 
-${apisSection(ctx)}${hybridSection(ctx)}
+${apisSection(ctx)}${hybridSection(ctx)}${fastSection(ctx)}
 ## Rules
 1. Use only the browser tools (browser_*${ctx.hybrid ? " and run_steps" : ""}) and the QA tools (record_step, report_bug, finish_test, list_test_data, query_records, create_record, update_test_record, call_api).
 2. Never click "Log out as ...", never log out, never switch user, and never change org configuration in Setup.
 3. Do not delete records. Outside of test data setup, create or edit records only when a test step requires it.
 4. Read the page with browser_snapshot before acting${ctx.hybrid ? " on anything you have not seen yet (run_steps may act on labels you already know)" : ""} and use visible labels and button names. Lightning loads asynchronously: wait for spinners and toasts (browser_wait_for) before judging a result.
-5. Evidence, for EVERY step: perform it, wait until the result is visible (dropdown open, toast shown, record saved), then call browser_take_screenshot${ctx.hybrid ? " (or a run_steps \"screenshot\" action)" : ""} with filename "NN_short_description.png" (NN = two-digit step order, for example 03_status_values.png; bare file name, no folders), then call record_step with that file name in "screenshot". Each step gets its own screenshot showing that step's result. record_step rejects a step whose screenshot is missing; if that happens, take it and call record_step again.
+5. Evidence, for EVERY step: perform it, wait until the result is visible (dropdown open, toast shown, record saved), then call browser_take_screenshot${ctx.hybrid ? " (or a run_steps \"screenshot\" action)" : ""} with filename "NN_short_description.png" (NN = two-digit step order, for example 03_status_values.png; bare file name, no folders), then call record_step${ctx.fast ? " (or record_steps for several steps)" : ""} with that file name in "screenshot". Each step gets its own screenshot showing that step's result. record_step rejects a step whose screenshot is missing; if that happens, take it and call record_step again.
 6. Verify thoroughly. When a step says to check values, open the picklist/dropdown and list every option you see in "result"; when it says to save, confirm the save toast and the saved values after the page refreshes; when it says a field is required or validated, try it and quote the message.
 7. Step status:
    - PASS: the application behaved as the step and expected result say.

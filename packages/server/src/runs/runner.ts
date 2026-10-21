@@ -4,12 +4,12 @@ import type { Browser } from "playwright";
 import { overallVerdict } from "@sfqa/shared";
 import type { BugRef, Org, Persona, Run, RunMetrics, StepResult } from "@sfqa/shared";
 import { describeApiCall, performApiCall } from "../agent/api-call.ts";
-import type { AgentBridge } from "../agent/bridge.ts";
+import type { AgentBridge, AgentHandlers } from "../agent/bridge.ts";
 import { runClaude, type ClaudeSettings } from "../agent/claude.ts";
 import type { BrowserMcpConfig } from "../agent/browser-mcp.ts";
 import type { SessionMetrics } from "../agent/metrics.ts";
 import { buildPrompt, guessTestCaseId } from "../agent/prompt.ts";
-import { API_EVIDENCE, type BugReport, type CallApi, type Create, type FinishReport, type ListTestData, type Query, type StepReport, type Update } from "../agent/protocol.ts";
+import { API_EVIDENCE, type BugReport, type CallApi, type Create, type FinishReport, type ListTestData, type Query, type StepReport, type StepsReport, type Update } from "../agent/protocol.ts";
 import { loadExternalApis } from "../config/apis.ts";
 import { adminApi, sidFromCookies } from "../salesforce/api.ts";
 import { allowedObjectsHint, checkedFields, checkedSoql, compactRows, isAllowedSObject } from "../testdata/rules.ts";
@@ -39,6 +39,9 @@ export interface RunnerDeps {
     // Off: the plain Playwright MCP browser, one Claude decision per browser action.
     hybrid?: boolean;
     browserMcpScript?: string;
+    // FAST_EXECUTION: start Claude while Login As runs, let Claude record several steps per call, and
+    // tell it which records the previous run of the same test case used. Off: the current path.
+    fast?: boolean;
     // Project folders: a run with a project saves its reports in <project>/<org>/ instead of qa/.
     projects?: ProjectStore;
     // config/apis.json: external systems tests may call with call_api.
@@ -89,6 +92,8 @@ export async function executeRun(runId: string, deps: RunnerDeps): Promise<void>
   let session: SessionMetrics | undefined;
   let shotsDirUsed: string | undefined;
   let reports: QaWorkspace | undefined;
+  let stopEarly: (() => void) | undefined;
+  let earlyAgent: Promise<AgentOutcome> | undefined;
 
   store.markRunning(runId);
   try {
@@ -106,6 +111,23 @@ export async function executeRun(runId: string, deps: RunnerDeps): Promise<void>
     const shotsDir = displayId && reports ? reports.screenshotsDir(displayId) : runDir;
     shotsDirUsed = shotsDir;
     const multi = personas.length > 1;
+    const phases: { loginMs?: number; reportMs?: number } = {};
+    const loginStarted = Date.now();
+
+    // Fast mode: start Claude now, while Login As runs. The prompt only needs the persona's user from
+    // the org config. The browser waits for the login session file, tools that change data wait for
+    // the login to succeed, and a failed login stops Claude before it does anything in Salesforce.
+    let loginGate: Deferred<boolean> | undefined;
+    // The run's own choice (panel switch) wins over the server default.
+    const fast = Boolean(agent && (run.request.fast ?? agent.fast));
+    const early = agent && displayId && reports && fast && agent.hybrid && agent.browserMcpScript ? earlyPersonas(personas as Persona[], org, runDir) : undefined;
+    if (agent && displayId && reports && early) {
+      loginGate = deferred<boolean>();
+      const gate = loginGate;
+      stopEarly = () => gate.resolve(false);
+      earlyAgent = runAgent({ deps: { ...deps, agent }, reports, runId, runDir, displayId, shotsDir, org, personas: early, loginGate: loginGate.promise, fast });
+      earlyAgent.catch(() => undefined);
+    }
 
     // Step 0: authenticate as each persona, each in its own isolated browser context (Login As).
     const sessions: { persona: Persona; session: Extract<Awaited<ReturnType<typeof openAsPersona>>, { ok: true }> }[] = [];
@@ -175,29 +197,47 @@ export async function executeRun(runId: string, deps: RunnerDeps): Promise<void>
       }
       await browser?.close();
       browser = undefined;
-      const outcome = await runAgent({ deps: { ...deps, agent }, reports: reports!, runId, runDir, displayId, shotsDir, org, personas: runPersonas });
+      phases.loginMs = Date.now() - loginStarted;
+      let outcome: AgentOutcome;
+      if (earlyAgent && loginGate) {
+        loginGate.resolve(true);
+        outcome = await earlyAgent;
+      } else {
+        outcome = await runAgent({ deps: { ...deps, agent }, reports: reports!, runId, runDir, displayId, shotsDir, org, personas: runPersonas, fast });
+      }
       finish = outcome.finish;
       testData = outcome.testData;
-      session = outcome.metrics;
+      session = outcome.metrics && { ...outcome.metrics, ...(fast && { fast: true }), phases: { ...outcome.metrics.phases, ...phases } };
+    } else if (earlyAgent && loginGate) {
+      // The login failed: stop the Claude session that was started early. Its cost still counts.
+      loginGate.resolve(false);
+      const outcome = await earlyAgent;
+      session = outcome.metrics && { ...outcome.metrics, fast: true, phases: { ...outcome.metrics.phases, loginMs: Date.now() - loginStarted } };
     } else if (allLoggedIn) {
       store.log(runId, "info", "Logged in. Test execution by Claude is not configured on this server.");
     }
 
     if (reports && displayId) {
+      const reportStart = Date.now();
       const admin = await readAdminMeta(deps.authDir, org.id);
       const otherScreenshots = (await readdir(shotsDir).catch(() => [] as string[])).filter((f) => EVIDENCE_NAME.test(f));
       const target = reports;
       await target.appendExecution(executionRecord({
         run: store.get(runId)!, displayId, org, persona: personas[0]!, extraPersonas: personas.slice(1) as Persona[], finish, adminName: admin.name, otherScreenshots, testData,
         screenshotRef: (file) => target.screenshotRef(displayId, file),
+        fast,
       }));
       const where = store.get(runId)?.reports;
       store.log(runId, "info", `Report updated: ${displayId}${where ? ` (${where.project} / ${where.folder})` : ""}`);
+      if (session) session = { ...session, phases: { ...session.phases, reportMs: Date.now() - reportStart } };
     }
   } catch (err) {
     error = (err as Error).message;
     store.log(runId, "error", error);
   } finally {
+    // An early-started Claude session never outlives its run.
+    stopEarly?.();
+    await earlyAgent?.catch(() => undefined);
     await browser?.close().catch(() => undefined);
     if (session) {
       const evidence = (await readdir(shotsDirUsed ?? runDir).catch(() => [] as string[])).filter((f) => /.(png|jpe?g)$/i.test(f));
@@ -222,6 +262,9 @@ export async function executeRun(runId: string, deps: RunnerDeps): Promise<void>
 export function mcpServers(o: {
   personas: RunPersona[]; runDir: string; browser: BrowserSettings; playwrightMcpCli: string; qaMcpScript: string; serverUrl: string; runId: string; key: string;
   browserMcpScript?: string;
+  // Fast mode: the QA tools include record_steps; waitForLogin: browsers wait for the session file.
+  fast?: boolean;
+  waitForLogin?: boolean;
 }): Record<string, { command: string; args: string[]; env?: Record<string, string> }> {
   const servers: Record<string, { command: string; args: string[]; env?: Record<string, string> }> = {};
   o.personas.forEach((p, i) => {
@@ -230,6 +273,7 @@ export function mcpServers(o: {
       const config: BrowserMcpConfig = {
         channel: o.browser.channel, headless: o.browser.headless, storageState: p.stateFile, outputDir, viewport: { width: 1440, height: 900 },
         ...(p.baseUrl && { baseUrl: p.baseUrl }),
+        ...(o.waitForLogin && { waitForStorageState: true }),
         stepsLog: join(o.runDir, i === 0 ? "run-steps.log" : `run-steps-${i + 1}.log`),
       };
       servers[p.server] = { command: process.execPath, args: [o.browserMcpScript], env: { SFQA_BROWSER: JSON.stringify(config) } };
@@ -252,9 +296,50 @@ export function mcpServers(o: {
   servers.qa = {
     command: process.execPath,
     args: [o.qaMcpScript],
-    env: { SFQA_URL: o.serverUrl, SFQA_RUN_ID: o.runId, SFQA_RUN_KEY: o.key },
+    env: { SFQA_URL: o.serverUrl, SFQA_RUN_ID: o.runId, SFQA_RUN_KEY: o.key, ...(o.fast && { SFQA_FAST: "1" }) },
   };
   return servers;
+}
+
+// record_steps: records each step in order through the normal record_step handler. Stops at the first
+// step that is rejected (missing screenshot, unknown persona), saying which steps were recorded.
+export async function recordSteps(r: StepsReport, step: (s: StepReport) => Promise<string>): Promise<string> {
+  const done: string[] = [];
+  for (const s of r.steps) {
+    try {
+      // One entry per test case step: merged entries ("2-3", "5, 6") would hide a step's own result.
+      if (/\d\s*(?:[-–,&]|and|to)\s*\d/i.test(String(s.n))) {
+        throw new Error(`"${s.n}" combines several steps. Record each step separately with its own number, result and screenshot.`);
+      }
+      await step(s);
+    } catch (err) {
+      throw new Error(`${done.length ? `Recorded step(s) ${done.join(", ")}. ` : ""}Step ${s.n} was NOT recorded: ${(err as Error).message} Fix it, then record step ${s.n} and the steps after it again.`, { cause: err });
+    }
+    done.push(String(s.n));
+  }
+  return `Recorded steps ${done.join(", ")}.`;
+}
+
+interface Deferred<T> { promise: Promise<T>; resolve(value: T): void }
+function deferred<T>(): Deferred<T> {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((r) => { resolve = r; });
+  return { promise, resolve };
+}
+
+type AgentOutcome = { finish?: FinishReport; testData: TestDataRecord[]; metrics?: SessionMetrics; loginFailed?: boolean };
+
+// The run's personas before Login As has finished, from the org config. Undefined (start Claude after
+// the login, as usual) when a persona's Salesforce user is not fully known from the config.
+function earlyPersonas(personas: Persona[], org: Org, runDir: string): RunPersona[] | undefined {
+  if (personas.some((p) => !p.userId || !p.username || !p.userFullName)) return undefined;
+  return personas.map((p, i) => ({
+    persona: p,
+    user: { id: p.userId!, name: p.userFullName!, username: p.username! },
+    stateFile: personaStateFile(runDir, i),
+    server: browserServer(i),
+    baseUrl: new URL(org.instanceUrl).origin,
+  }));
 }
 
 // The report workspace for a run: its project's folder for the run's org (created on first use), or
@@ -279,8 +364,25 @@ async function runAgent(ctx: {
   shotsDir: string;
   org: Org;
   personas: RunPersona[];
-}): Promise<{ finish?: FinishReport; testData: TestDataRecord[]; metrics?: SessionMetrics }> {
+  // Fast mode: Claude starts before Login As has finished. Resolves true once every persona is logged
+  // in (their session files are written), false if the login failed.
+  loginGate?: Promise<boolean>;
+  // Fast execution for this run.
+  fast?: boolean;
+}): Promise<AgentOutcome> {
   const { deps, runId, displayId, shotsDir, org, reports } = ctx;
+  const fast = Boolean(ctx.fast);
+  const stop = new AbortController();
+  let loginFailed = false;
+  void ctx.loginGate?.then((ok) => {
+    if (ok) return;
+    loginFailed = true;
+    stop.abort();
+  });
+  // Tools that act as a persona or change Salesforce data wait for the login (reads do not).
+  const requireLogin = async () => {
+    if (ctx.loginGate && !(await ctx.loginGate)) throw new Error("Login As failed, so this run is stopping. Do not continue.");
+  };
   const { persona, user } = ctx.personas[0]!;
   const multi = ctx.personas.length > 1;
   const { store, agent } = deps;
@@ -320,7 +422,7 @@ async function runAgent(ctx: {
   const retake = (file: string) =>
     `Screenshot "${file}" was not found. Call browser_take_screenshot with filename "${file}" (bare file name, no folder), then call this tool again.`;
 
-  const key = agent.bridge.open(runId, {
+  const handlers: AgentHandlers = {
     async step(r: StepReport) {
       // Evidence is mandatory: a step without its screenshot is rejected so Claude takes it and retries.
       const apiFiles = r.apiEvidence ?? [];
@@ -452,13 +554,25 @@ async function runAgent(ctx: {
       finish = r;
       return "Test finished and recorded. Stop now.";
     },
-  });
+  };
+  // Fast mode: several consecutive steps in one call, each validated exactly like record_step.
+  if (fast) {
+    handlers.steps = (r: StepsReport) => recordSteps(r, (step) => handlers.step!(step));
+  }
+  if (ctx.loginGate) {
+    for (const kind of ["step", "steps", "bug", "finish", "create", "update", "api"] as const) {
+      const handler = handlers[kind] as ((r: unknown) => Promise<string>) | undefined;
+      if (handler) (handlers as Record<string, unknown>)[kind] = async (r: unknown) => { await requireLogin(); return handler(r); };
+    }
+  }
+  const key = agent.bridge.open(runId, handlers);
 
   const mcpConfig = join(ctx.runDir, "mcp.json");
   const servers = mcpServers({
     personas: ctx.personas, runDir: ctx.runDir, browser: deps.browser, playwrightMcpCli: agent.playwrightMcpCli,
     qaMcpScript: agent.qaMcpScript, serverUrl: agent.serverUrl, runId, key,
     ...(agent.hybrid && agent.browserMcpScript && { browserMcpScript: agent.browserMcpScript }),
+    ...(fast && { fast: true, waitForLogin: Boolean(ctx.loginGate) }),
   });
   let metrics: SessionMetrics | undefined;
   await writeFile(mcpConfig, JSON.stringify({ mcpServers: servers }, null, 2));
@@ -479,9 +593,12 @@ async function runAgent(ctx: {
         ...(multi && { personas: ctx.personas.map((p) => ({ persona: p.persona, user: p.user, server: p.server })) }),
         apis: externalApis.map((a) => ({ name: a.name, description: a.description, allowWrite: a.allowWrite })),
         hybrid: Boolean(agent.hybrid && agent.browserMcpScript),
+        ...(fast && { fast: true, previousRun: await previousRunOf(reports, testCaseId, org.name) }),
       }),
       onLog: (level, message) => store.log(runId, level, message),
+      signal: stop.signal,
     });
+    if (loginFailed) return { testData: createdData, ...(result.metrics && { metrics: result.metrics }), loginFailed: true };
     metrics = result.metrics;
     if (result.turns) store.log(runId, "info", `Claude finished in ${result.turns} turns${result.durationMs ? ` (${Math.round(result.durationMs / 1000)}s)` : ""}.`);
     if (!result.ok) store.log(runId, "error", result.error ?? "Claude stopped with an error.");
@@ -508,12 +625,25 @@ async function runAgent(ctx: {
   return { finish, testData: createdData, metrics };
 }
 
+// The latest earlier run of the same test case in the same org: which records it used, so Claude can
+// check those first instead of searching again. Never a substitute for checking they still fit.
+async function previousRunOf(reports: QaWorkspace, testCaseId: string, environment: string): Promise<{ runId: string; status: string; records: string } | undefined> {
+  const last = (await reports.listExecutions().catch(() => [])).filter((r) => r.testCaseId === testCaseId && r.environment === environment).at(-1);
+  if (!last) return undefined;
+  const created = ((last.testData as { sobject: string; name: string; id: string }[] | undefined) ?? []).map((t) => `${t.sobject} "${t.name}" (${t.id})`);
+  const records = [String(last.record ?? ""), ...created].filter(Boolean).join("; ").slice(0, 600);
+  return records ? { runId: last.runId, status: last.status, records } : undefined;
+}
+
+const secs = (ms?: number) => (ms === undefined ? "?" : `${(ms / 1000).toFixed(1)}s`);
+
 export function describeMetrics(m: RunMetrics): string {
   const t = m.tokens;
   const tokens = t ? `, tokens in ${t.input + t.cacheCreation + t.cacheRead} (cached ${t.cacheRead}) / out ${t.output}` : "";
   return `Metrics (${m.mode}): ${Math.round(m.totalMs / 1000)}s total, ${m.turns ?? "?"} Claude turns, ${m.browserActions} browser actions` +
     ` (${m.batches} batches, ${m.batchSteps} batched, ${m.batchFallbacks} fallbacks), ${m.snapshots} snapshots, ${m.screenshots} screenshots` +
     ` (${m.imagesToClaude} sent to Claude), ${m.fixedWaits} fixed waits (${m.fixedWaitSeconds}s), tool output ${Math.round(m.toolResultChars / 1000)}k chars${tokens}` +
+    `${m.phases ? `, login ${secs(m.phases.loginMs)}, Claude start ${secs(m.phases.claudeStartupMs)}, reports ${secs(m.phases.reportMs)}` : ""}${m.fast ? ", fast execution" : ""}` +
     `${m.costUsd !== undefined ? `, ~${m.costUsd.toFixed(2)}` : ""}.`;
 }
 
@@ -523,6 +653,10 @@ export function executionRecord(o: {
   otherScreenshots?: string[]; testData?: TestDataRecord[];
   // Link to a run file from the report page; defaults to the shared qa/ layout.
   screenshotRef?: (file: string) => string;
+  // End of the run for its duration (defaults to now, when the report is written).
+  finishedAt?: number;
+  // The run used fast execution.
+  fast?: boolean;
 }) {
   const ref = o.screenshotRef ?? ((file: string) => `../Screenshots/${o.displayId}/${file}`);
   const { run, finish } = o;
@@ -543,6 +677,9 @@ export function executionRecord(o: {
     priority: finish?.priority ?? "",
     environment: o.org.name,
     executedOn: reportTimestamp(new Date(run.startedAt ?? run.createdAt)),
+    // How long the run took, from the start of the login until the report was written.
+    ...(run.startedAt && { durationSec: Math.max(0, Math.round(((o.finishedAt ?? Date.now()) - new Date(run.startedAt).getTime()) / 1000)) }),
+    executionMode: o.fast ? "Fast" : "Standard",
     executedBy: `Claude Code via Playwright MCP (Login As ${user || o.persona.name}${o.adminName ? `, session of ${o.adminName}` : ""})`,
     record: finish?.record ?? "",
     status: verdict,

@@ -1,4 +1,5 @@
 import type {
+  CaseUpdate, GeneratedCase, Generation, StartGenerationRequest,
   NewPersona, Org, OrgConnection, OrgsConfig, ParsedSuite, Persona, Review, Run, RunEvent, RunRequest, SalesforceUser, StartReviewRequest,
   StartSuiteRequest, Suite,
 } from "@sfqa/shared";
@@ -29,6 +30,10 @@ export type BgRequest =
   | { type: "removePersona"; orgId: string; personaId: string }
   | { type: "createRun"; request: RunRequest }
   | { type: "getReportLinks"; project?: string; orgId?: string }
+  | { type: "startGeneration"; request: StartGenerationRequest }
+  | { type: "getGeneration"; id: string }
+  | { type: "updateCase"; id: string; tcId: string; update: CaseUpdate }
+  | { type: "exportCases"; id: string; approved?: boolean }
   | { type: "getProjects" }
   | { type: "createProject"; name: string }
   | { type: "addProjectOrg"; project: string; orgId: string }
@@ -59,6 +64,10 @@ export interface BgResponses {
   removePersona: null;
   createRun: Run;
   getReportLinks: ReportLinks;
+  startGeneration: Generation;
+  getGeneration: Generation;
+  updateCase: GeneratedCase;
+  exportCases: { dataUrl: string; fileName: string };
   getProjects: { root: string; projects: Project[] };
   createProject: Project;
   addProjectOrg: ProjectOrg;

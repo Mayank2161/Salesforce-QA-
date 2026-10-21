@@ -37,3 +37,14 @@ test("the record uses the run's verdict rule and RMS QA field names", () => {
   assert.deepEqual(rec.bugs, ["BUG-001"]);
   assert.deepEqual(rec.steps[2], { n: "2", action: "Step 2", status: "FAIL", result: "result 2" });
 });
+
+test("the record keeps the execution time and the mode the run used", () => {
+  const end = new Date(at).getTime() + 83_400;
+  const rec = executionRecord({ run, displayId: "RUN-20261001-006", org, persona, finishedAt: end, fast: true });
+  assert.equal(rec.durationSec, 83);
+  assert.equal(rec.executionMode, "Fast");
+  const standard = executionRecord({ run, displayId: "RUN-20261001-006", org, persona, finishedAt: end });
+  assert.equal(standard.executionMode, "Standard");
+  // A run that never started has no execution time rather than a made-up one.
+  assert.equal(executionRecord({ run: { ...run, startedAt: undefined }, displayId: "RUN-20261001-006", org, persona }).durationSec, undefined);
+});

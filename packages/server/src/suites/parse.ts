@@ -10,11 +10,11 @@ export class SuiteFileError extends Error {
 const COLUMNS = {
   tcId: { label: "TC ID", aliases: ["tcid", "testcaseid", "tcno", "testid", "caseid", "testcaseno", "testcasenumber", "id"] },
   sprint: { label: "Sprint", aliases: ["sprint"] },
-  story: { label: "Story", aliases: ["story", "userstory", "storyid"] },
+  story: { label: "Story", aliases: ["story", "userstory", "storyid", "jirastoryid", "jirastory", "jiraid", "storykey"] },
   module: { label: "Module", aliases: ["module", "object", "area", "feature", "component"] },
   title: { label: "Title", aliases: ["title", "testcasetitle", "testcasename", "testcase", "scenario", "testscenario", "summary"] },
   persona: { label: "Persona", aliases: ["persona", "userpersona", "user", "role", "userrole"] },
-  description: { label: "Description", aliases: ["description", "desc", "objective", "testobjective"] },
+  description: { label: "Description", aliases: ["description", "desc", "objective", "testobjective", "testcasedescription"] },
   prereq: { label: "Pre-Req", aliases: ["prereq", "prerequisite", "prerequisites", "precondition", "preconditions", "prereqs"] },
   type: { label: "Type", aliases: ["type", "testtype", "testcasetype"] },
   priority: { label: "Priority", aliases: ["priority"] },

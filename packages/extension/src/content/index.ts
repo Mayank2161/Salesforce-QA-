@@ -2,6 +2,7 @@ import { personaLabel, type Org, type Persona, type Run, type RunEvent, type Sal
 import { RUN_EVENTS_PORT, send, type Connection, type PortMessage } from "../messages.ts";
 import { h, logo } from "./dom.ts";
 import { createProjectsPanel } from "./projects.ts";
+import { createStoryPanel } from "./story.ts";
 import { createSuitePanel } from "./suite.ts";
 import { STYLES } from "./styles.ts";
 
@@ -86,6 +87,7 @@ const projectsPanel = createProjectsPanel({
 const suitePanel = createSuitePanel({
   orgId: () => orgSelect.value,
   project: () => projectsPanel.project(),
+  fast: () => fastToggle.checked,
   personas: () => currentOrg()?.personas ?? [],
   defaultPersona: () => currentPersona(),
   canRun: () => {
@@ -95,21 +97,72 @@ const suitePanel = createSuitePanel({
 });
 const suiteBox = h("div", { className: "mode-box", hidden: true }, suitePanel.element);
 const singleTab = h("button", { className: "tab active", textContent: "Single test", type: "button" });
-const suiteTab = h("button", { className: "tab", textContent: "Upload file (Excel / CSV)", type: "button" });
-const modeTabs = h("div", { className: "tabs" }, singleTab, suiteTab);
+const suiteTab = h("button", { className: "tab", textContent: "Upload file", title: "Run test cases from an Excel or CSV file", type: "button" });
+const storyTab = h("button", { className: "tab", textContent: "Jira story", type: "button" });
+const modeTabs = h("div", { className: "tabs" }, singleTab, suiteTab, storyTab);
 
-function setMode(mode: "single" | "suite"): void {
+// Paste a Jira story, generate test cases, review them, and run the approved ones as a batch.
+const storyPanel = createStoryPanel({
+  orgId: () => orgSelect.value,
+  orgName: () => currentOrg()?.name,
+  project: () => projectsPanel.project(),
+  personas: () => currentOrg()?.personas ?? [],
+  defaultPersona: () => currentPersona(),
+  fast: () => fastToggle.checked,
+  canRun: () => {
+    const c = currentConnection();
+    return agentConnected && Boolean(c?.connected) && !c?.expired;
+  },
+  onBatchStarted: (suiteId, scope) => {
+    setMode("suite");
+    void suitePanel.showSuite(suiteId, scope);
+  },
+});
+const storyBox = h("div", { className: "mode-box", hidden: true }, storyPanel.element);
+
+// Fast execution on/off for the runs started from this panel (single test and batches). Off runs
+// exactly the current way; on starts Claude during the login and lets it record several steps at once.
+const fastToggle = h("input", { type: "checkbox", className: "switch-input" });
+const fastState = h("span", { className: "switch-state" });
+const fastHint = h("div", { className: "hint" });
+const fastRow = h("div", { className: "fast-row" },
+  h("label", { className: "switch" }, fastToggle, h("span", { className: "switch-track" }, h("span", { className: "switch-knob" })), h("span", { className: "switch-label", textContent: "Fast execution" }), fastState),
+  fastHint,
+);
+function renderFast(): void {
+  fastState.textContent = fastToggle.checked ? "On" : "Off";
+  fastState.className = `switch-state${fastToggle.checked ? " on" : ""}`;
+  fastHint.textContent = fastToggle.checked
+    ? "On: Claude starts during the login and records finished steps together. Same checks, screenshots and PASS/FAIL rules."
+    : "Off: runs work exactly as before (current mode).";
+}
+// Clicking the switch must not move the panel: keep the scroll position as it was.
+fastRow.addEventListener("mousedown", () => {
+  const body = panel.querySelector<HTMLElement>(".body");
+  const top = body?.scrollTop ?? 0;
+  requestAnimationFrame(() => { if (body) body.scrollTop = top; panel.scrollTop = 0; });
+});
+fastToggle.onchange = () => {
+  renderFast();
+  void chrome.storage.local.set({ fastExecution: fastToggle.checked });
+};
+
+function setMode(mode: "single" | "suite" | "story"): void {
   singleTab.classList.toggle("active", mode === "single");
   suiteTab.classList.toggle("active", mode === "suite");
+  storyTab.classList.toggle("active", mode === "story");
   singleBox.hidden = mode !== "single";
   suiteBox.hidden = mode !== "suite";
-  // The batch table needs more room than a single test.
-  panel.classList.toggle("wide", mode === "suite");
+  storyBox.hidden = mode !== "story";
+  // The batch table and the generated test cases need more room than a single test.
+  panel.classList.toggle("wide", mode !== "single");
   if (mode === "suite") suitePanel.refresh();
+  if (mode === "story") storyPanel.refresh();
   void chrome.storage.local.set({ panelMode: mode });
 }
 singleTab.onclick = () => setMode("single");
 suiteTab.onclick = () => setMode("suite");
+storyTab.onclick = () => setMode("story");
 
 const section = (title: string, ...children: (Node | string)[]) =>
   h("section", { className: "card" }, h("div", { className: "card-title", textContent: title }), ...children);
@@ -138,9 +191,11 @@ const panel = h("div", { className: "panel", hidden: true },
       addPersonaForm,
     ),
     h("section", { className: "card" },
+      fastRow,
       modeTabs,
       singleBox,
       suiteBox,
+      storyBox,
     ),
   ),
 );
@@ -182,8 +237,10 @@ async function refresh(): Promise<void> {
     detectedOrgId = detected?.org.id;
     await loadOrgs(true);
 
-    const saved = await chrome.storage.local.get(["lastOrgId", "lastPersonaId", "panelMode"]);
-    if (saved.panelMode === "suite") setMode("suite");
+    const saved = await chrome.storage.local.get(["lastOrgId", "lastPersonaId", "panelMode", "fastExecution"]);
+    fastToggle.checked = saved.fastExecution === true;
+    renderFast();
+    if (saved.panelMode === "suite" || saved.panelMode === "story") setMode(saved.panelMode);
     orgSelect.value = detectedOrgId ?? (saved.lastOrgId as string | undefined) ?? orgs[0]?.id ?? "";
     renderOrgHint(detected?.created ?? false);
     renderOrg(saved.lastPersonaId as string | undefined);
@@ -468,7 +525,7 @@ async function startRun(): Promise<void> {
     const title = titleInput.value.trim();
     const extraPersonaIds = selectedExtraPersonas();
     const project = projectsPanel.project();
-    const run = await send({ type: "createRun", request: { orgId, personaId, ...(extraPersonaIds.length && { extraPersonaIds }), testCase: { body, ...(title && { title }) }, ...(project && { project }) } });
+    const run = await send({ type: "createRun", request: { orgId, personaId, ...(extraPersonaIds.length && { extraPersonaIds }), testCase: { body, ...(title && { title }) }, ...(project && { project }), fast: fastToggle.checked } });
     watchRun(run.id);
   } catch (err) {
     result.replaceChildren(h("div", { className: "error-box", textContent: (err as Error).message }));

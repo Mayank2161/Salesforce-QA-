@@ -2,7 +2,7 @@
 // (browser_snapshot, browser_click, ...) plus run_steps, which performs a batch of generic actions
 // (actions.ts) on the same page in one call. Claude still decides every step and judges every
 // result; run_steps only saves a round trip per click. Configured through env SFQA_BROWSER (JSON).
-import { appendFile } from "node:fs/promises";
+import { appendFile, readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
@@ -19,6 +19,8 @@ export interface BrowserMcpConfig {
   storageState: string;
   outputDir: string;
   viewport: { width: number; height: number };
+  // Fast execution: Claude starts before Login As has finished; wait for the session file.
+  waitForStorageState?: boolean;
   // Org origin that org-relative URLs (/lightning/...) resolve against before the first page load.
   baseUrl?: string;
   // Audit trail of every run_steps call (input and result), kept with the run.
@@ -48,8 +50,27 @@ const { createConnection } = mcpRequire("@playwright/mcp") as {
 const { chromium } = mcpRequire("playwright-core") as typeof import("playwright");
 
 let context: BrowserContext | undefined;
+// The login session file, once Login As has written it (fast execution starts Claude earlier).
+async function storageStateReady(file: string): Promise<void> {
+  const deadline = Date.now() + 5 * 60_000;
+  // Complete JSON only: the runner may still be writing the file.
+  const ready = async () => {
+    try {
+      JSON.parse(await readFile(file, "utf8"));
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  while (!(await ready())) {
+    if (Date.now() > deadline) throw new Error("The persona login did not finish in time.");
+    await new Promise((r) => setTimeout(r, 200));
+  }
+}
+
 async function getContext(): Promise<BrowserContext> {
   if (context) return context;
+  if (config!.waitForStorageState) await storageStateReady(config!.storageState);
   const browser = await chromium.launch({ channel: config!.channel === "chromium" ? undefined : config!.channel, headless: config!.headless });
   context = await browser.newContext({ storageState: config!.storageState, viewport: config!.viewport });
   return context;

@@ -12,5 +12,7 @@ export const QA_TEMPLATES_DIR = resolve(import.meta.dirname, "../templates/qa");
 export const QA_MCP_SCRIPT = resolve(import.meta.dirname, "agent/qa-mcp.ts");
 // Each persona's browser in hybrid execution: Playwright MCP tools plus run_steps.
 export const BROWSER_MCP_SCRIPT = resolve(import.meta.dirname, "agent/browser-mcp.ts");
+// Tools for turning a Jira story into test cases (no browser, no Salesforce).
+export const STORY_MCP_SCRIPT = resolve(import.meta.dirname, "agent/story-mcp.ts");
 export const REVIEW_MCP_SCRIPT = resolve(import.meta.dirname, "agent/review-mcp.ts");
 export const PLAYWRIGHT_MCP_CLI = join(REPO_ROOT, "node_modules", "@playwright", "mcp", "cli.js");

@@ -5,6 +5,7 @@ import Fastify, { type FastifyInstance, type FastifyReply } from "fastify";
 import websocket from "@fastify/websocket";
 import { z } from "zod";
 import {
+  CaseUpdate, StartGenerationRequest,
   NewPersona, PROTOCOL_VERSION, ParseSuiteRequest, RunId, RunRequest, SlugId, StartReviewRequest, StartSuiteRequest, detectOrgFromHostname, myDomainOf, toSlug,
 } from "@sfqa/shared";
 import type { Org, Persona, Run, RunEvent, SalesforceUser } from "@sfqa/shared";
@@ -12,6 +13,7 @@ import type { AgentBridge } from "./agent/bridge.ts";
 import { ConfigError, loadOrgsConfig, updateOrgsConfig } from "./config/orgs.ts";
 import { EVIDENCE_NAME, type QaWorkspace } from "./reports/workspace.ts";
 import { PROJECT_SECTIONS, ProjectError, type ProjectStore } from "./projects/store.ts";
+import { GenerationError, type GenerationService } from "./generation/service.ts";
 import { RunStore } from "./runs/store.ts";
 import { SuiteFileError, readRows, toSuite } from "./suites/parse.ts";
 import { SuiteStore } from "./suites/store.ts";
@@ -41,6 +43,8 @@ export interface AppOptions {
   qa?: QaWorkspace;
   // Project folders (QA-Workspace/Projects/<project>/<org>/) for reports and notes.
   projects?: ProjectStore;
+  // Test cases generated from pasted Jira stories.
+  generations?: GenerationService;
   // Shows a folder in the computer's file manager (Explorer on Windows).
   openFolder?: (path: string) => Promise<void>;
   // Uploaded test-case batches.
@@ -131,6 +135,9 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
   app.setErrorHandler((error, _req, reply) => {
     if (error instanceof HttpError) return reply.code(error.statusCode).send(error.body);
     if (error instanceof ProjectError) return reply.code(PROJECT_ERROR_STATUS[error.code]).send({ error: error.code, message: error.message });
+    if (error instanceof GenerationError) {
+      return reply.code({ busy: 409, running: 409, not_found: 404, unknown_case: 404 }[error.code]).send({ error: error.code, message: error.message });
+    }
     if (error instanceof SalesforceApiError) {
       return reply.code(API_ERROR_STATUS[error.code]).send({ error: error.code, message: error.message });
     }
@@ -199,6 +206,37 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
     if (!r.success) throw new HttpError(400, { error: "invalid_request", issues: r.error.issues });
     return r.data;
   };
+
+  // --- Test cases from a Jira story ---------------------------------------------------------------------
+  // Generation never runs anything in Salesforce. Approved cases are run with the normal batch runner.
+
+  const generations = () => {
+    if (!opts.generations) throw new HttpError(501, { error: "generation_not_available" });
+    return opts.generations;
+  };
+
+  app.post("/generations", async (req, reply) => {
+    const body = parse(StartGenerationRequest, req.body);
+    const org = await findOrg(body.orgId);
+    if (body.project) await projects().get(body.project);
+    return reply.code(202).send(await generations().start(org, body));
+  });
+
+  app.get<{ Params: { id: string } }>("/generations/:id", async (req, reply) => {
+    const gen = await generations().get(req.params.id);
+    return gen ?? reply.code(404).send({ error: "not_found" });
+  });
+
+  app.put<{ Params: { id: string; tcId: string } }>("/generations/:id/cases/:tcId", async (req) =>
+    generations().updateCase(req.params.id, req.params.tcId, parse(CaseUpdate, req.body)));
+
+  app.get<{ Params: { id: string }; Querystring: { approved?: string } }>("/generations/:id/export", async (req, reply) => {
+    const { data, fileName } = await generations().exportXlsx(req.params.id, req.query.approved === "1");
+    return reply
+      .type("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+      .header("Content-Disposition", `attachment; filename="${fileName.replace(/[^A-Za-z0-9_.-]/g, "_")}"`)
+      .send(Buffer.from(data));
+  });
 
   app.get("/projects", async () => ({ root: projects().root, projects: await projects().list() }));
 
@@ -383,7 +421,7 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
   app.post("/suites", async (req, reply) => {
     const parsed = StartSuiteRequest.safeParse(req.body);
     if (!parsed.success) return reply.code(400).send({ error: "invalid_request", issues: parsed.error.issues });
-    const { orgId, fileName, defaultPersonaId, cases, project } = parsed.data;
+    const { orgId, fileName, defaultPersonaId, cases, project, fast } = parsed.data;
     const org = await findOrg(orgId);
     const personaOf = (id?: string) => org.personas.find((p) => p.id === (id ?? defaultPersonaId));
 
@@ -409,6 +447,7 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
         testCase: { title: `${c.tcId} - ${c.title}`.slice(0, 200), body: c.body },
         suiteId,
         ...(project && { project }),
+        ...(fast !== undefined && { fast }),
       });
       opts.onRunCreated?.(run);
       const names = [persona, ...extra.map((id) => org.personas.find((p) => p.id === id)!)].map((p) => p.name).join(" + ");

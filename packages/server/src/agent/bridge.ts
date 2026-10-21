@@ -3,13 +3,15 @@ import { z } from "zod";
 import { tokensMatch } from "../api/security.ts";
 import {
   REPORT_SCHEMAS,
+  type CasesReport, type CriteriaReport, type FinishGeneration,
   type BugReport, type CallApi, type Create, type FinishReport, type FinishReview, type ListTestData, type Query, type ReportKind,
-  type RequirementsReport, type StepReport, type Update, type VerdictReport,
+  type RequirementsReport, type StepReport, type StepsReport, type Update, type VerdictReport,
 } from "./protocol.ts";
 
 // A test run provides the run tools; a test case review provides the review tools.
 export interface AgentHandlers {
   step?(report: StepReport): Promise<string>;
+  steps?(report: StepsReport): Promise<string>;
   bug?(report: BugReport): Promise<string>;
   finish?(report: FinishReport): Promise<string>;
   // Test data setup; optional so a run can be started without it.
@@ -23,6 +25,10 @@ export interface AgentHandlers {
   requirements?(report: RequirementsReport): Promise<string>;
   verdict?(report: VerdictReport): Promise<string>;
   reviewDone?(report: FinishReview): Promise<string>;
+  // Test cases from a Jira story.
+  criteria?(report: CriteriaReport): Promise<string>;
+  cases?(report: CasesReport): Promise<string>;
+  generationDone?(report: FinishGeneration): Promise<string>;
 }
 
 export interface DispatchResult {

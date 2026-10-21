@@ -51,6 +51,8 @@ export const StartSuiteRequest = z.object({
   defaultPersonaId: SlugId.optional(),
   // Project folder every row's reports are saved in.
   project: ProjectName.optional(),
+  // Fast execution for every row of the batch.
+  fast: z.boolean().optional(),
   cases: z.array(z.object({
     tcId: z.string().trim().min(1).max(60),
     title: z.string().max(300),

@@ -4,7 +4,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
-  BugReportShape, CallApiShape, CreateShape, FinishReportShape, ListTestDataShape, QueryShape, StepReportShape, UpdateShape, type ReportKind,
+  BugReportShape, CallApiShape, CreateShape, FinishReportShape, ListTestDataShape, QueryShape, StepReportShape, StepsReportShape, UpdateShape, type ReportKind,
 } from "./protocol.ts";
 
 const { SFQA_URL, SFQA_RUN_ID, SFQA_RUN_KEY } = process.env;
@@ -47,6 +47,16 @@ server.registerTool("report_bug", {
     "Set existingBugId instead of filing a duplicate when it matches a known open bug.",
   inputSchema: BugReportShape,
 }, (input) => report("bug", input));
+
+// Fast execution (SFQA_FAST=1): record several finished steps in one call instead of one call each.
+if (process.env.SFQA_FAST === "1") {
+  server.registerTool("record_steps", {
+    description:
+      "Record several consecutive test steps in one call, once each step's result is known and its own screenshot was taken. " +
+      "Each entry is validated exactly like record_step (a step without its screenshot is rejected). Use it instead of calling record_step once per step.",
+    inputSchema: StepsReportShape,
+  }, (input) => report("steps", input));
+}
 
 // Test data setup. These run with the org admin's access, not as the persona, so use them only to
 // prepare preconditions; perform the test steps themselves in the browser.

@@ -68,6 +68,17 @@ async function handle(req: BgRequest): Promise<unknown> {
       if (req.orgId) q.set("orgId", req.orgId);
       return json(`/reports/links${q.size ? `?${q}` : ""}`);
     }
+    case "startGeneration":
+      return json("/generations", jsonBody(req.request));
+    case "getGeneration":
+      return json(`/generations/${encodeURIComponent(req.id)}`);
+    case "updateCase":
+      return json(`/generations/${encodeURIComponent(req.id)}/cases/${encodeURIComponent(req.tcId)}`, { ...jsonBody(req.update), method: "PUT" });
+    case "exportCases": {
+      const res = await api(`/generations/${encodeURIComponent(req.id)}/export${req.approved ? "?approved=1" : ""}`);
+      const fileName = /filename="([^"]+)"/.exec(res.headers.get("content-disposition") ?? "")?.[1] ?? "TestCases.xlsx";
+      return { dataUrl: `data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;base64,${toBase64(await res.arrayBuffer())}`, fileName };
+    }
     case "getProjects":
       return json("/projects");
     case "createProject":

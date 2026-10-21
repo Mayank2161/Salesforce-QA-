@@ -69,7 +69,7 @@
     </div>
     <div class="list table-scroll">
       <table>
-        <thead><tr><th>Test case</th><th>Title</th><th>Module</th><th>Result</th><th class="n">Bugs</th><th>Run date</th></tr></thead>
+        <thead><tr><th>Test case</th><th>Title</th><th>Module</th><th>Result</th><th class="n">Bugs</th><th>Run date</th><th class="n">Time</th></tr></thead>
         <tbody id="rows"></tbody>
       </table>
     </div>
@@ -163,6 +163,12 @@
   }
   function joinAnd(a) { return a.length < 2 ? a.join("") : a.slice(0, -1).join(", ") + " and " + a[a.length - 1]; }
 
+  function timeTile() {
+    var timed = scoped().filter(function (r) { return typeof r.durationSec === "number"; });
+    if (!timed.length) return "";
+    var total = timed.reduce(function (a, r) { return a + r.durationSec; }, 0);
+    return '<div class="kpi"><div class="label">Execution time</div><div class="value">' + esc(dur(total)) + '</div><div class="note">avg ' + esc(dur(Math.round(total / timed.length))) + " per run" + (timed.length < scoped().length ? " · " + timed.length + " timed" : "") + "</div></div>";
+  }
   function kpis(c, bugs) {
     var t = function (label, value, color, note) {
       return '<div class="kpi"><div class="label">' + (color ? '<span class="dot" style="background:' + color + '"></span>' : "") + label + '</div><div class="value">' + value + "</div>" + (note ? '<div class="note">' + note + "</div>" : "") + "</div>";
@@ -173,7 +179,7 @@
       t("Passed", c.pass, "var(--good)", U.pct(c.pass, c.n) + "% of total") +
       t("Failed", c.fail, "var(--critical)", U.pct(c.fail, c.n) + "% of total") +
       t("Blocked", c.blocked, "var(--warning)", U.pct(c.blocked, c.n) + "% of total") +
-      t("Open defects", bugs.length, null, ch + " Critical / High");
+      t("Open defects", bugs.length, null, ch + " Critical / High") + timeTile();
   }
 
   function breakdown(c) {
@@ -212,6 +218,8 @@
     }).sort(function (a, b) { return (ORDER[a.status] ?? 9) - (ORDER[b.status] ?? 9) || all.indexOf(b) - all.indexOf(a); });
   }
 
+  // "1m 23s"; runs recorded before execution times were kept show "–".
+  function dur(s) { if (typeof s !== "number") return "–"; var m = Math.floor(s / 60), r = s % 60; return m ? m + "m " + (r < 10 ? "0" : "") + r + "s" : r + "s"; }
   function f(l, v) { return "<div><span>" + l + "</span>" + (v || "–") + "</div>"; }
   function detail(r) {
     var bugs = (r.bugs || []).map(function (b) { return '<a href="../bugs/Bug_Report.html#' + esc(b) + '">' + esc(b) + "</a>"; }).join(", ");
@@ -220,7 +228,7 @@
     var shots = U.shots(r.screenshots);
     return '<div class="facts">' +
       f("Story", esc(r.story)) + f("Persona", esc(r.persona)) + f("Type · Priority", esc([r.type, r.priority].filter(Boolean).join(" · "))) +
-      f("Executed on", esc(r.executedOn)) + f("Run ID", esc(r.runId)) + f("Linked defects", bugs) + "</div>" +
+      f("Executed on", esc(r.executedOn)) + f("Execution time", esc(dur(r.durationSec)) + (r.executionMode ? " · " + esc(r.executionMode) + " mode" : "")) + f("Run ID", esc(r.runId)) + f("Linked defects", bugs) + "</div>" +
       (r.remarks ? '<div class="box note" style="margin-bottom:14px">' + esc(r.remarks) + "</div>" : "") +
       '<div class="two"><div><h3>Expected</h3><div class="box">' + esc(r.expected) + '</div></div><div><h3>Actual</h3><div class="box">' + esc(r.actual) + "</div></div></div>" +
       '<details class="more"><summary>Steps (' + r.steps.length + (failed ? ", " + failed + " not passed" : ", all passed") + ')</summary><div class="inner table-scroll"><table><thead><tr><th>#</th><th>Step</th><th>Result</th><th>Observed</th></tr></thead><tbody>' + steps + "</tbody></table></div></details>" +
@@ -237,14 +245,14 @@
   function render() {
     var list = filtered(scoped());
     $("listTitle").textContent = view === "latest" ? "Test results (latest run of each test case)" : "Test results (all runs)";
-    if (!list.length) { $("rows").innerHTML = '<tr><td colspan="6" class="empty">No results match.</td></tr>'; return; }
+    if (!list.length) { $("rows").innerHTML = '<tr><td colspan="7" class="empty">No results match.</td></tr>'; return; }
     $("rows").innerHTML = list.map(function (r) {
       var isOpen = openRun === r.runId;
       var edited = (r.statusHistory || []).length ? ' <span class="badge b-edited" title="Status changed manually">edited</span>' : "";
       return '<tr class="row' + (isOpen ? " open" : "") + '" id="' + esc(r.runId) + '" data-run="' + esc(r.runId) + '"><td class="id">' + esc(r.testCaseId) + '</td><td class="t">' + esc(r.title) +
         '<div class="sub">' + esc(view === "all" ? r.runId : r.story || "") + "</div></td><td>" + esc(r.module) + "</td><td>" + badge(r.status) + edited +
-        '</td><td class="n">' + U.num((r.bugs || []).length) + '</td><td style="white-space:nowrap">' + esc(U.fmtDay(U.day(r.executedOn))) + "</td></tr>" +
-        (isOpen ? '<tr class="detail"><td colspan="6">' + detail(r) + "</td></tr>" : "");
+        '</td><td class="n">' + U.num((r.bugs || []).length) + '</td><td style="white-space:nowrap">' + esc(U.fmtDay(U.day(r.executedOn))) + '</td><td class="n" style="white-space:nowrap">' + esc(dur(r.durationSec)) + "</td></tr>" +
+        (isOpen ? '<tr class="detail"><td colspan="7">' + detail(r) + "</td></tr>" : "");
     }).join("");
   }
 
@@ -278,7 +286,7 @@
   U.lightbox();
 
   $("exportCsv").addEventListener("click", function () {
-    var cols = ["runId", "sprint", "story", "testCaseId", "title", "module", "type", "priority", "persona", "environment", "executedOn", "status", "remarks", "expected", "actual"];
+    var cols = ["runId", "sprint", "story", "testCaseId", "title", "module", "type", "priority", "persona", "environment", "executedOn", "durationSec", "executionMode", "status", "remarks", "expected", "actual"];
     U.csv([cols.concat("bugs", "lastStatusChange")].concat(filtered(scoped()).map(function (r) {
       var h = (r.statusHistory || []).slice(-1)[0];
       var last = h ? h.from + " -> " + h.to + " (" + h.by + ", " + h.on + ")" + (h.note ? ": " + h.note : "") : "";

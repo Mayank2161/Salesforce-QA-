@@ -75,6 +75,15 @@ export const RunMetrics = z.object({
     input: z.number().int(), cacheCreation: z.number().int(), cacheRead: z.number().int(), output: z.number().int(),
   }).optional(),
   costUsd: z.number().optional(),
+  // FAST_EXECUTION was on for this run.
+  fast: z.boolean().optional(),
+  // Where the time went: Login As (all personas), Claude Code start until its first message, and
+  // writing the reports. Claude's own working time is claudeMs.
+  phases: z.object({
+    loginMs: z.number().nonnegative().optional(),
+    claudeStartupMs: z.number().nonnegative().optional(),
+    reportMs: z.number().nonnegative().optional(),
+  }).optional(),
 });
 export type RunMetrics = z.infer<typeof RunMetrics>;
 

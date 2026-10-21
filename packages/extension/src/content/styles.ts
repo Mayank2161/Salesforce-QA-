@@ -111,6 +111,63 @@ button[hidden] { display: none; }
 .note-editor .btn.link.danger { margin-right: auto; margin-left: 0; }
 textarea.note-body { min-height: 120px; font-family: inherit; font-size: 13px; }
 
+/* Fast execution switch */
+.fast-row { display: flex; flex-direction: column; gap: 4px; padding: 10px 12px; background: var(--canvas); border: 1px solid var(--border); border-radius: var(--radius); }
+/* The checkbox stays inside the switch (position: relative), so focusing it never scrolls the panel. */
+.switch { position: relative; flex-direction: row; align-items: center; gap: 10px; cursor: pointer; font-weight: 600; }
+.switch-input { position: absolute; top: 0; left: 0; margin: 0; opacity: 0; width: 36px; height: 20px; min-height: 0; padding: 0; border: 0; pointer-events: none; }
+/* Same height on and off, so nothing below moves when it is switched. */
+.fast-row .hint { min-height: 2.9em; }
+.switch-track { position: relative; flex: none; width: 36px; height: 20px; border-radius: 999px; background: #d1d5db; transition: background .15s ease; }
+.switch-knob { position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,.25); transition: transform .15s ease; }
+.switch-input:checked + .switch-track { background: var(--ok); }
+.switch-input:checked + .switch-track .switch-knob { transform: translateX(16px); }
+.switch-input:focus-visible + .switch-track { box-shadow: 0 0 0 3px rgba(11, 92, 171, .25); }
+.switch-label { font-size: 13px; }
+.switch-state { margin-left: auto; font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 999px; background: #e5e7eb; color: var(--muted); }
+.switch-state.on { background: #e3f3e8; color: var(--ok); }
+
+/* Jira story -> test cases */
+.story { display: flex; flex-direction: column; gap: 10px; }
+textarea.story-text { min-height: 160px; font-family: inherit; font-size: 13px; }
+.story-progress, .story-results { display: flex; flex-direction: column; gap: 10px; }
+.story-progress[hidden], .story-results[hidden] { display: none; }
+.bar .fill.indeterminate { width: 35%; animation: slide 1.4s ease-in-out infinite; }
+@keyframes slide { from { transform: translateX(-100%); } to { transform: translateX(290%); } }
+.story-summary { display: flex; flex-direction: column; gap: 8px; }
+.story-coverage { display: flex; flex-direction: column; gap: 6px; }
+.more-box { border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; background: var(--surface); }
+.more-box summary { cursor: pointer; font-weight: 600; font-size: 12.5px; }
+.more-box ul { margin: 6px 0 0; padding-left: 18px; display: flex; flex-direction: column; gap: 4px; font-size: 12.5px; }
+.story-toolbar { display: flex; flex-direction: column; gap: 8px; padding-top: 4px; border-top: 1px solid var(--border); }
+.story-toolbar .row { flex-wrap: wrap; }
+.story-filter { width: auto; min-width: 150px; }
+.case-list { display: flex; flex-direction: column; gap: 8px; max-height: 520px; overflow-y: auto; padding-right: 2px; }
+.case { border: 1px solid var(--border); border-left: 3px solid #d1d5db; border-radius: var(--radius); background: var(--surface); display: flex; flex-direction: column; }
+.case.Approved { border-left-color: var(--ok); }
+.case.Rejected { border-left-color: var(--err); opacity: .75; }
+.case-head { display: flex; align-items: center; gap: 8px; width: 100%; padding: 9px 10px; border: none; background: none; cursor: pointer; text-align: left; font: inherit; color: var(--text); }
+.case-id { font-family: Consolas, monospace; font-size: 11.5px; color: var(--muted); flex: none; }
+.case-title { flex: 1; min-width: 0; font-weight: 600; font-size: 13px; }
+.case:not(.open) .case-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.review-chip { flex: none; font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 999px; background: #e5e7eb; color: var(--muted); }
+.review-chip.Approved { background: #e3f3e8; color: var(--ok); }
+.review-chip.Rejected { background: #fdecec; color: var(--err); }
+.case-actions { justify-content: flex-end; padding: 0 10px 9px; }
+.case-actions .btn.link { margin-right: auto; }
+.case-body { display: flex; flex-direction: column; gap: 10px; padding: 0 12px 10px; }
+.case-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 8px; }
+.case-label { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .4px; color: var(--muted); }
+.case-value { white-space: pre-wrap; word-break: break-word; }
+.case-steps { margin: 2px 0 0; padding-left: 20px; display: flex; flex-direction: column; gap: 3px; }
+textarea.case-edit { min-height: 0; font-family: inherit; font-size: 13px; }
+.badge.type-Positive { background: var(--ok); }
+.badge.type-Negative { background: var(--err); }
+.badge.type-Boundary, .badge.type-Edgecase { background: #7c3aed; }
+.badge.type-Validation { background: var(--warn); }
+.badge.type-Permission { background: var(--brand); }
+.badge.type-Dataintegrity, .badge.type-Integration, .badge.type-Regression { background: #475569; }
+
 /* Single test | Upload file */
 .tabs { display: flex; gap: 4px; padding: 3px; background: var(--canvas); border: 1px solid var(--border); border-radius: 8px; }
 .tab { flex: 1; font: inherit; font-size: 12.5px; font-weight: 600; padding: 7px 10px; border: none; border-radius: 6px; background: none; color: var(--muted); cursor: pointer; }

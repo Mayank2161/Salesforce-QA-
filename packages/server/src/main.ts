@@ -2,11 +2,12 @@ import { AgentBridge } from "./agent/bridge.ts";
 import { claudeSettingsFromEnv } from "./agent/claude.ts";
 import { buildApp } from "./app.ts";
 import { loadEnv } from "./env.ts";
-import { APIS_CONFIG_PATH, AUTH_DIR, BROWSER_MCP_SCRIPT, REPO_ROOT, ORGS_CONFIG_PATH, PLAYWRIGHT_MCP_CLI, QA_DIR, QA_MCP_SCRIPT, QA_TEMPLATES_DIR, REVIEW_MCP_SCRIPT, RUNS_DIR } from "./paths.ts";
+import { APIS_CONFIG_PATH, AUTH_DIR, BROWSER_MCP_SCRIPT, REPO_ROOT, ORGS_CONFIG_PATH, PLAYWRIGHT_MCP_CLI, QA_DIR, QA_MCP_SCRIPT, QA_TEMPLATES_DIR, REVIEW_MCP_SCRIPT, RUNS_DIR, STORY_MCP_SCRIPT } from "./paths.ts";
 import { QaWorkspace } from "./reports/workspace.ts";
 import { ProjectStore } from "./projects/store.ts";
 import { openFolder, workspaceRoot } from "./projects/workspace-root.ts";
 import { ReviewService } from "./reviews/service.ts";
+import { GenerationService } from "./generation/service.ts";
 import { RunStore } from "./runs/store.ts";
 import { cleanupStaleRuns, createRunner } from "./runs/runner.ts";
 import { SalesforceApiError, adminApi, searchUsers } from "./salesforce/api.ts";
@@ -57,10 +58,14 @@ const runRun = createRunner({
     projects,
     // HYBRID_EXECUTION=false runs every browser action through Claude, as before.
     hybrid: process.env.HYBRID_EXECUTION !== "false",
+    // FAST_EXECUTION=true: start Claude during Login As, record several steps per call, reuse the last
+    // run's records. Off by default until measured; the current path stays as it is.
+    fast: process.env.FAST_EXECUTION === "true",
     browserMcpScript: BROWSER_MCP_SCRIPT,
     apisConfigPath: APIS_CONFIG_PATH,
   },
 });
+const generations = new GenerationService({ bridge, claude, serverUrl, storyMcpScript: STORY_MCP_SCRIPT, workDir: RUNS_DIR, qaRoot: QA_DIR, projects });
 const reviews = new ReviewService({ bridge, qa, claude, serverUrl, reviewMcpScript: REVIEW_MCP_SCRIPT, workDir: RUNS_DIR });
 
 const app = await buildApp({
@@ -70,6 +75,7 @@ const app = await buildApp({
   bridge,
   qa,
   projects,
+  generations,
   openFolder,
   reviews,
   onRunCreated: runRun,

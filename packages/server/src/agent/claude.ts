@@ -114,6 +114,8 @@ export function runClaude(opts: {
   prompt: string;
   allowedTools?: string[];
   onLog: (level: "info" | "warn" | "error", message: string) => void;
+  // Aborting stops Claude and its tool servers (for example when the run's login failed).
+  signal?: AbortSignal;
 }): Promise<ClaudeRunResult> {
   const { settings, onLog } = opts;
   return new Promise((resolve) => {
@@ -126,6 +128,16 @@ export function runClaude(opts: {
 
     let result: ClaudeRunResult | undefined;
     const metrics = new MetricsCollector();
+    const spawnedAt = Date.now();
+    let startupMs: number | undefined;
+    const withTimes = () => ({ ...metrics.metrics, ...(startupMs !== undefined && { phases: { claudeStartupMs: startupMs } }) });
+    let aborted = false;
+    const onAbort = () => {
+      aborted = true;
+      killTree(child.pid);
+    };
+    if (opts.signal?.aborted) queueMicrotask(onAbort);
+    else opts.signal?.addEventListener("abort", onAbort, { once: true });
     let stderr = "";
     let timedOut = false;
 
@@ -134,7 +146,7 @@ export function runClaude(opts: {
       return {
         ok: false,
         error: `Timed out after ${Math.round(settings.timeoutMs / 60_000)} minutes${pending.length ? ` while waiting for ${pending.join(", ")} to return` : ""}.`,
-        metrics: metrics.metrics,
+        metrics: withTimes(),
       };
     };
     const timer = setTimeout(() => {
@@ -163,6 +175,7 @@ export function runClaude(opts: {
       }
       metrics.onMessage(msg);
       if (msg.type === "system" && msg.subtype === "init") {
+        startupMs ??= Date.now() - spawnedAt;
         for (const s of (msg.mcp_servers as { name: string; status: string }[] | undefined) ?? []) {
           if (s.status !== "connected") onLog("error", `Tool server "${s.name}" failed to start (${s.status}).`);
         }
@@ -189,8 +202,10 @@ export function runClaude(opts: {
 
     child.on("close", (code) => {
       clearTimeout(timer);
+      opts.signal?.removeEventListener("abort", onAbort);
       if (timedOut) return resolve(timedOutResult());
-      if (result) return resolve({ ...result, metrics: metrics.metrics });
+      if (aborted) return resolve({ ok: false, error: "Stopped by the agent server.", metrics: withTimes() });
+      if (result) return resolve({ ...result, metrics: withTimes() });
       const tail = stderr.trim().split("\n").slice(-3).join(" ").slice(0, 500);
       resolve({ ok: false, error: `Claude Code exited (code ${code}) without a result.${tail ? ` ${tail}` : ""}` });
     });
