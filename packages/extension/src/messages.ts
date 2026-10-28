@@ -1,5 +1,5 @@
 import type {
-  CaseUpdate, GeneratedCase, Generation, StartGenerationRequest,
+  CaseUpdate, GeneratedCase, Generation, RunTestSetRequest, SaveTestSetRequest, StartGenerationRequest, TestSet,
   NewPersona, Org, OrgConnection, OrgsConfig, ParsedSuite, Persona, Review, Run, RunEvent, RunRequest, SalesforceUser, StartReviewRequest,
   StartSuiteRequest, Suite,
 } from "@sfqa/shared";
@@ -13,6 +13,9 @@ export interface ReportLinks {
   executionReport: string; bugReport: string; reviewReport: string;
   scope?: { project: string; folder: string } | { org: string };
 }
+
+// An earlier Jira story generation, for the "Recent stories" list.
+export interface GenerationSummary { id: string; storyKey: string; createdAt: string; status: Generation["status"]; cases: number; project?: string }
 
 // An org's admin connection, plus who connected it.
 export type Connection = OrgConnection & { name?: string; username?: string };
@@ -32,6 +35,13 @@ export type BgRequest =
   | { type: "getReportLinks"; project?: string; orgId?: string }
   | { type: "startGeneration"; request: StartGenerationRequest }
   | { type: "getGeneration"; id: string }
+  | { type: "listGenerations"; orgId: string }
+  | { type: "deleteGeneration"; id: string }
+  | { type: "listTestSets"; orgId: string; project?: string }
+  | { type: "saveTestSet"; request: SaveTestSetRequest }
+  | { type: "getTestSet"; id: string }
+  | { type: "deleteTestSet"; id: string }
+  | { type: "runTestSet"; id: string; options: Partial<RunTestSetRequest> }
   | { type: "updateCase"; id: string; tcId: string; update: CaseUpdate }
   | { type: "exportCases"; id: string; approved?: boolean }
   | { type: "getProjects" }
@@ -66,6 +76,13 @@ export interface BgResponses {
   getReportLinks: ReportLinks;
   startGeneration: Generation;
   getGeneration: Generation;
+  listGenerations: { generations: GenerationSummary[] };
+  deleteGeneration: null;
+  listTestSets: { testSets: TestSet[] };
+  saveTestSet: TestSet;
+  getTestSet: TestSet;
+  deleteTestSet: null;
+  runTestSet: { set: TestSet; suite: Suite };
   updateCase: GeneratedCase;
   exportCases: { dataUrl: string; fileName: string };
   getProjects: { root: string; projects: Project[] };
@@ -106,6 +123,59 @@ export async function loadSettings(): Promise<Settings> {
   return { ...DEFAULT_SETTINGS, ...stored } as Settings;
 }
 
+export const RELOADED_MESSAGE = "The extension was reloaded. Refresh this page.";
+
+let reloadedListener: (() => void) | undefined;
+
+/** Called once when the page's panel finds the extension was reloaded or updated under it. */
+export function onExtensionReloaded(listener: () => void): void {
+  reloadedListener = listener;
+}
+
+function extensionGone(): void {
+  const listener = reloadedListener;
+  reloadedListener = undefined;
+  listener?.();
+}
+
+// After the extension is reloaded, the panel already on a page is cut off from it, and every
+// chrome.* call throws "Extension context invalidated" (even synchronously). The panel uses
+// these wrappers so that never surfaces as an uncaught error; it asks for a page refresh instead.
+export const panelStorage = {
+  async get(keys: string | string[]): Promise<Record<string, unknown>> {
+    try {
+      return await chrome.storage.local.get(keys);
+    } catch {
+      extensionGone();
+      return {};
+    }
+  },
+  set(items: Record<string, unknown>): void {
+    try {
+      chrome.storage.local.set(items).catch(extensionGone);
+    } catch {
+      extensionGone();
+    }
+  },
+  remove(keys: string | string[]): void {
+    try {
+      chrome.storage.local.remove(keys).catch(extensionGone);
+    } catch {
+      extensionGone();
+    }
+  },
+};
+
+/** Opens a long-lived connection to the background worker, or undefined if the extension was reloaded. */
+export function connectPort(name: string): chrome.runtime.Port | undefined {
+  try {
+    return chrome.runtime.connect({ name });
+  } catch {
+    extensionGone();
+    return undefined;
+  }
+}
+
 export async function send<K extends BgRequest["type"]>(
   request: Extract<BgRequest, { type: K }>,
 ): Promise<BgResponses[K]> {
@@ -113,7 +183,8 @@ export async function send<K extends BgRequest["type"]>(
   try {
     result = await chrome.runtime.sendMessage(request);
   } catch {
-    throw new Error("The extension was reloaded. Refresh this page.");
+    extensionGone();
+    throw new Error(RELOADED_MESSAGE);
   }
   if (!result) throw new Error("No response from the extension background worker.");
   if (!result.ok) throw new Error(result.error);

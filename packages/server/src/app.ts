@@ -5,15 +5,16 @@ import Fastify, { type FastifyInstance, type FastifyReply } from "fastify";
 import websocket from "@fastify/websocket";
 import { z } from "zod";
 import {
-  CaseUpdate, StartGenerationRequest,
+  CaseUpdate, RunTestSetRequest, SaveTestSetRequest, StartGenerationRequest,
   NewPersona, PROTOCOL_VERSION, ParseSuiteRequest, RunId, RunRequest, SlugId, StartReviewRequest, StartSuiteRequest, detectOrgFromHostname, myDomainOf, toSlug,
 } from "@sfqa/shared";
-import type { Org, Persona, Run, RunEvent, SalesforceUser } from "@sfqa/shared";
+import type { Org, Persona, Run, RunEvent, SalesforceUser, Suite } from "@sfqa/shared";
 import type { AgentBridge } from "./agent/bridge.ts";
 import { ConfigError, loadOrgsConfig, updateOrgsConfig } from "./config/orgs.ts";
 import { EVIDENCE_NAME, type QaWorkspace } from "./reports/workspace.ts";
 import { PROJECT_SECTIONS, ProjectError, type ProjectStore } from "./projects/store.ts";
 import { GenerationError, type GenerationService } from "./generation/service.ts";
+import { TestSetError, type TestSetService } from "./testsets/service.ts";
 import { RunStore } from "./runs/store.ts";
 import { SuiteFileError, readRows, toSuite } from "./suites/parse.ts";
 import { SuiteStore } from "./suites/store.ts";
@@ -45,6 +46,8 @@ export interface AppOptions {
   projects?: ProjectStore;
   // Test cases generated from pasted Jira stories.
   generations?: GenerationService;
+  // Saved Sanity and Regression test sets.
+  testSets?: TestSetService;
   // Shows a folder in the computer's file manager (Explorer on Windows).
   openFolder?: (path: string) => Promise<void>;
   // Uploaded test-case batches.
@@ -114,6 +117,11 @@ const PUBLIC_ROUTES = new Set(["/health", "/qa/:key/*", "/ws/:key/*", "/internal
 export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
   const store = opts.store ?? new RunStore();
   const suites = opts.suites ?? new SuiteStore(store);
+  suites.enableRechecks((request) => {
+    const run = store.create(request);
+    opts.onRunCreated?.(run);
+    return run;
+  });
   const app = Fastify({
     logger: opts.logger === false ? false : {
       serializers: { req: (req) => ({ method: req.method, url: redactToken(req.url) }) },
@@ -135,6 +143,9 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
   app.setErrorHandler((error, _req, reply) => {
     if (error instanceof HttpError) return reply.code(error.statusCode).send(error.body);
     if (error instanceof ProjectError) return reply.code(PROJECT_ERROR_STATUS[error.code]).send({ error: error.code, message: error.message });
+    if (error instanceof TestSetError) {
+      return reply.code({ not_found: 404, name_exists: 409, running: 409 }[error.code]).send({ error: error.code, message: error.message });
+    }
     if (error instanceof GenerationError) {
       return reply.code({ busy: 409, running: 409, not_found: 404, unknown_case: 404 }[error.code]).send({ error: error.code, message: error.message });
     }
@@ -220,6 +231,51 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
     const org = await findOrg(body.orgId);
     if (body.project) await projects().get(body.project);
     return reply.code(202).send(await generations().start(org, body));
+  });
+
+  app.get<{ Querystring: { orgId?: string } }>("/generations", async (req) => {
+    const orgId = parse(SlugId, req.query.orgId);
+    return { generations: await generations().list(orgId) };
+  });
+
+  app.delete<{ Params: { id: string } }>("/generations/:id", async (req, reply) => {
+    await generations().delete(req.params.id);
+    return reply.code(204).send();
+  });
+
+  // --- Test sets (Sanity / Regression) --------------------------------------------------------------
+
+  const testSets = () => {
+    if (!opts.testSets) throw new HttpError(501, { error: "test_sets_not_available" });
+    return opts.testSets;
+  };
+
+  app.get<{ Querystring: { orgId?: string; project?: string } }>("/test-sets", async (req) => {
+    const orgId = parse(SlugId, req.query.orgId);
+    return { testSets: await testSets().list(orgId, req.query.project || undefined) };
+  });
+
+  app.post("/test-sets", async (req, reply) => {
+    const body = parse(SaveTestSetRequest, req.body);
+    const org = await findOrg(body.orgId);
+    if (body.project) await projects().get(body.project);
+    return reply.code(201).send(await testSets().save(org, body));
+  });
+
+  app.get<{ Params: { id: string } }>("/test-sets/:id", async (req, reply) => {
+    const set = await testSets().get(req.params.id);
+    return set ?? reply.code(404).send({ error: "not_found" });
+  });
+
+  app.delete<{ Params: { id: string } }>("/test-sets/:id", async (req, reply) => {
+    await testSets().delete(req.params.id);
+    return reply.code(204).send();
+  });
+
+  // Runs the set as a batch (with re-checks of failures unless turned off).
+  app.post<{ Params: { id: string } }>("/test-sets/:id/run", async (req, reply) => {
+    const body = parse(RunTestSetRequest, req.body ?? {});
+    return reply.code(202).send(await testSets().run(req.params.id, body, startSuite));
   });
 
   app.get<{ Params: { id: string } }>("/generations/:id", async (req, reply) => {
@@ -418,24 +474,19 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
     }
   });
 
-  app.post("/suites", async (req, reply) => {
-    const parsed = StartSuiteRequest.safeParse(req.body);
-    if (!parsed.success) return reply.code(400).send({ error: "invalid_request", issues: parsed.error.issues });
-    const { orgId, fileName, defaultPersonaId, cases, project, fast } = parsed.data;
+  // Starts a batch: validates every row first (so a bad batch never half-starts), then queues one run
+  // per row. Used by uploaded files, approved Jira cases and saved test sets.
+  const startSuite = async (request: StartSuiteRequest): Promise<Suite> => {
+    const { orgId, fileName, defaultPersonaId, cases, project, fast, recheck } = request;
     const org = await findOrg(orgId);
     const personaOf = (id?: string) => org.personas.find((p) => p.id === (id ?? defaultPersonaId));
 
-    // Validate every row before queuing any, so a bad batch never half-starts.
     const missing = cases.filter((c) => !personaOf(c.personaId)).map((c) => c.tcId);
-    if (missing.length) {
-      return reply.code(400).send({ error: "persona_required", message: `Choose a default persona for: ${missing.join(", ")}` });
-    }
+    if (missing.length) throw new HttpError(400, { error: "persona_required", message: `Choose a default persona for: ${missing.join(", ")}` });
     const unknownExtra = cases.filter((c) => (c.extraPersonaIds ?? []).some((id) => !org.personas.some((p) => p.id === id))).map((c) => c.tcId);
-    if (unknownExtra.length) {
-      return reply.code(400).send({ error: "unknown_persona", message: `Unknown persona in: ${unknownExtra.join(", ")}` });
-    }
+    if (unknownExtra.length) throw new HttpError(400, { error: "unknown_persona", message: `Unknown persona in: ${unknownExtra.join(", ")}` });
 
-    const suiteId = suites.create(orgId, fileName, []);
+    const suiteId = suites.create(orgId, fileName, [], new Date(), { ...(recheck && { recheck: true }) });
     const items = cases.map((c) => {
       const persona = personaOf(c.personaId)!;
       // The primary persona never repeats as an extra one (it may be the default persona).
@@ -454,7 +505,13 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
       return { tcId: c.tcId, title: c.title, ...(c.module && { module: c.module }), personaId: persona.id, personaName: names, runId: run.id };
     });
     suites.setItems(suiteId, items);
-    return reply.code(202).send(suites.get(suiteId));
+    return suites.get(suiteId)!;
+  };
+
+  app.post("/suites", async (req, reply) => {
+    const parsed = StartSuiteRequest.safeParse(req.body);
+    if (!parsed.success) return reply.code(400).send({ error: "invalid_request", issues: parsed.error.issues });
+    return reply.code(202).send(await startSuite(parsed.data));
   });
 
   app.get<{ Params: { id: string } }>("/suites/:id", async (req, reply) => {

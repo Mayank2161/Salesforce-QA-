@@ -226,6 +226,7 @@ export async function executeRun(runId: string, deps: RunnerDeps): Promise<void>
         run: store.get(runId)!, displayId, org, persona: personas[0]!, extraPersonas: personas.slice(1) as Persona[], finish, adminName: admin.name, otherScreenshots, testData,
         screenshotRef: (file) => target.screenshotRef(displayId, file),
         fast,
+        ...(run.request.recheckOf && { recheckOf: store.get(run.request.recheckOf)?.displayId ?? run.request.recheckOf }),
       }));
       const where = store.get(runId)?.reports;
       store.log(runId, "info", `Report updated: ${displayId}${where ? ` (${where.project} / ${where.folder})` : ""}`);
@@ -657,6 +658,8 @@ export function executionRecord(o: {
   finishedAt?: number;
   // The run used fast execution.
   fast?: boolean;
+  // The run this one re-checked (its display id), when it was an automatic re-check.
+  recheckOf?: string;
 }) {
   const ref = o.screenshotRef ?? ((file: string) => `../Screenshots/${o.displayId}/${file}`);
   const { run, finish } = o;
@@ -680,6 +683,7 @@ export function executionRecord(o: {
     // How long the run took, from the start of the login until the report was written.
     ...(run.startedAt && { durationSec: Math.max(0, Math.round(((o.finishedAt ?? Date.now()) - new Date(run.startedAt).getTime()) / 1000)) }),
     executionMode: o.fast ? "Fast" : "Standard",
+    ...(o.recheckOf && { recheckOf: o.recheckOf }),
     executedBy: `Claude Code via Playwright MCP (Login As ${user || o.persona.name}${o.adminName ? `, session of ${o.adminName}` : ""})`,
     record: finish?.record ?? "",
     status: verdict,

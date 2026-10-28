@@ -236,6 +236,7 @@
       '<details class="more"><summary>More details</summary><div class="inner"><div class="facts" style="margin:0">' +
       f("Sprint", esc(r.sprint)) + f("Environment", esc(r.environment)) + f("Record", esc(r.record)) + f("Executed by", esc(r.executedBy)) +
       f("Precondition", esc(r.precondition)) + (r.suite ? f("Batch", esc(r.suite)) : "") +
+      (r.recheckOf ? f("Re-check of", '<a href="#' + esc(r.recheckOf) + '">' + esc(r.recheckOf) + "</a>") : "") +
       ((r.testData || []).length ? f("Test data created", esc(r.testData.map(function (t) { return t.sobject + ": " + t.name + " (" + t.id + ")"; }).join("; "))) : "") +
       "</div></div></details>" +
       QAStatus.historyHtml(r.statusHistory, esc, badge) +

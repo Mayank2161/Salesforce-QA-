@@ -97,6 +97,30 @@ export class GenerationService {
     return structuredClone(gen);
   }
 
+  // Earlier generations for an org, newest first: enough to pick one to reopen.
+  async list(orgId: string): Promise<{ id: string; storyKey: string; createdAt: string; status: Generation["status"]; cases: number; project?: string }[]> {
+    const out = [];
+    for (const id of Object.keys(await this.#readIndex())) {
+      const g = await this.get(id);
+      if (g && g.orgId === orgId) out.push({ id: g.id, storyKey: g.storyKey, createdAt: g.createdAt, status: g.status, cases: g.cases.length, ...(g.project && { project: g.project }) });
+    }
+    return out.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }
+
+  // Removes a saved generation (its JSON and index entry). Excel files already exported stay.
+  delete(id: string): Promise<void> {
+    return this.#serial(async () => {
+      if (this.#active === id) throw new GenerationError("running", "This story is still being analysed. Wait for it to finish.");
+      const index = await this.#readIndex();
+      const file = index[id] ?? this.#gens.get(id)?.file;
+      if (!file) throw new GenerationError("not_found", `There is no generation ${id}.`);
+      await rm(file, { force: true });
+      delete index[id];
+      await writeFileAtomic(this.#indexFile(), `${JSON.stringify(index, null, 2)}\n`);
+      this.#gens.delete(id);
+    });
+  }
+
   async get(id: string): Promise<Generation | undefined> {
     const entry = this.#gens.get(id) ?? (await this.#load(id));
     return entry && structuredClone(entry.gen);

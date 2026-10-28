@@ -1,5 +1,6 @@
 import { personaLabel, type ParsedSuite, type Persona, type Suite, type SuiteCase, type SuiteItem } from "@sfqa/shared";
-import { send } from "../messages.ts";
+import { panelStorage, send } from "../messages.ts";
+import { createSaveSetForm } from "./saveset.ts";
 import { h } from "./dom.ts";
 import { createReviewPanel } from "./review.ts";
 
@@ -49,7 +50,19 @@ export function createSuitePanel(ctx: SuiteContext): { element: HTMLElement; ref
     testCasesFileName: () => parsed?.fileName,
   });
   review.element.hidden = true;
-  const element = h("div", { className: "suite" }, drop, message, personaNote, table, buttons, review.element, summary);
+  // Re-run each FAIL/BLOCKED case once: failing again confirms it, passing marks it flaky. Off by default.
+  const recheck = h("input", { type: "checkbox" });
+  const recheckLabel = h("label", { className: "chip", title: "Run every failed or blocked case once more to tell real failures from flaky ones" }, recheck, h("span", { textContent: "Re-check failures once" }));
+  void panelStorage.get("recheckFailures").then((v) => { recheck.checked = v.recheckFailures === true; });
+  recheck.onchange = () => panelStorage.set({ recheckFailures: recheck.checked });
+  const selectedCases = () => parsed?.cases.filter((c) => !c.error && c.tcId && selected.has(c.row)) ?? [];
+  const saveSet = createSaveSetForm(async (name, kind) => {
+    const d = ctx.defaultPersona();
+    const project = ctx.project();
+    const set = await send({ type: "saveTestSet", request: { name, kind, orgId: ctx.orgId(), ...(project && { project }), ...(d && { defaultPersonaId: d.id }), cases: selectedCases().map(toCase) } });
+    showMessage("ok", `Saved test set "${set.name}" (${set.kind}, ${set.cases.length} cases). Run it from the Test sets tab.`);
+  });
+  const element = h("div", { className: "suite" }, drop, message, personaNote, table, buttons, saveSet.element, review.element, summary);
 
   // --- Choosing a file ----------------------------------------------------------
 
@@ -161,6 +174,8 @@ export function createSuitePanel(ctx: SuiteContext): { element: HTMLElement; ref
     const everything = runnable(parsed!.cases);
     const blocked = !ctx.canRun();
     buttons.replaceChildren(
+      recheckLabel,
+      h("button", { className: "btn secondary", textContent: `Save as test set (${chosen.length})`, disabled: chosen.length === 0, onclick: () => saveSet.open(selectedCases().length) }),
       h("button", { className: "btn secondary", textContent: "Clear", onclick: clear }),
       h("button", { className: "btn secondary", textContent: `Run Selected (${chosen.length})`, disabled: blocked || chosen.length === 0, onclick: () => void start(chosen) }),
       h("button", { className: "btn small", textContent: `Run All (${everything.length})`, disabled: blocked || everything.length === 0, onclick: () => void start(everything) }),
@@ -181,6 +196,17 @@ export function createSuitePanel(ctx: SuiteContext): { element: HTMLElement; ref
 
   // --- Running ------------------------------------------------------------------
 
+  function toCase(c: SuiteCase) {
+    return {
+      tcId: c.tcId!,
+      title: c.title,
+      ...(c.module && { module: c.module }),
+      ...(c.personaId && { personaId: c.personaId }),
+      ...(c.extraPersonaIds?.length && { extraPersonaIds: c.extraPersonaIds }),
+      body: c.body,
+    };
+  }
+
   async function start(cases: SuiteCase[]): Promise<void> {
     const d = ctx.defaultPersona();
     const project = ctx.project();
@@ -194,20 +220,14 @@ export function createSuitePanel(ctx: SuiteContext): { element: HTMLElement; ref
           ...(d && { defaultPersonaId: d.id }),
           ...(project && { project }),
           fast: ctx.fast(),
-          cases: cases.map((c) => ({
-            tcId: c.tcId!,
-            title: c.title,
-            ...(c.module && { module: c.module }),
-            ...(c.personaId && { personaId: c.personaId }),
-            ...(c.extraPersonaIds?.length && { extraPersonaIds: c.extraPersonaIds }),
-            body: c.body,
-          })),
+          ...(recheck.checked && { recheck: true }),
+          cases: cases.map(toCase),
         },
       });
     } catch (err) {
       return showMessage("err", (err as Error).message);
     }
-    void chrome.storage.local.set({ [LAST_SUITE_KEY]: suite.id });
+    panelStorage.set({ [LAST_SUITE_KEY]: suite.id });
     renderSuite();
     watch();
   }
@@ -246,6 +266,16 @@ export function createSuitePanel(ctx: SuiteContext): { element: HTMLElement; ref
     renderSummary();
   }
 
+  // "Re-check RUN-…: PASS, flaky" / "…: FAIL, confirmed failure" / "re-checking…".
+  function recheckNote(i: SuiteItem): string {
+    const r = i.recheck!;
+    const id = r.displayId ? ` ${r.displayId}` : "";
+    if (r.status === "queued" || r.status === "running") return `Re-checking${id}…`;
+    if (i.outcome === "flaky") return `Re-check${id}: PASS. Flaky: failed first, passed the second time. Review the bug.`;
+    if (i.outcome === "confirmed") return `Re-check${id}: ${r.verdict}. Confirmed failure.`;
+    return `Re-check${id} did not complete (${r.status}).`;
+  }
+
   function suiteRow(i: SuiteItem): HTMLElement {
     const status = i.status === "completed" ? (i.verdict ?? "BLOCKED") : i.status.toUpperCase();
     const tc = i.displayId && i.status !== "queued"
@@ -258,6 +288,7 @@ export function createSuitePanel(ctx: SuiteContext): { element: HTMLElement; ref
       h("span", { className: "ttl", textContent: i.title }),
       h("span", { className: "per", textContent: i.personaName }),
       badge(status, status),
+      ...(i.recheck ? [h("div", { className: `row-note${i.outcome === "confirmed" ? " err" : ""}`, textContent: recheckNote(i) })] : []),
       ...(i.bugs.length ? [h("div", { className: "row-note", textContent: `Bugs: ${i.bugs.join(", ")}` })] : []),
       ...(i.error ? [h("div", { className: "row-note err", textContent: i.error })] : []),
     );
@@ -274,6 +305,7 @@ export function createSuitePanel(ctx: SuiteContext): { element: HTMLElement; ref
         stat("Total", s.total), stat("Passed", s.passed, "PASS"), stat("Failed", s.failed, "FAIL"), stat("Blocked", s.blocked, "BLOCKED"),
         ...(s.errors ? [stat("Errors", s.errors, "FAIL")] : []),
         ...(s.cancelled ? [stat("Cancelled", s.cancelled)] : []),
+        ...(s.flaky ? [stat("Flaky", s.flaky, "BLOCKED")] : []),
         ...(s.pending ? [stat("Pending", s.pending)] : []),
       ),
       h("div", { className: "row end" },
@@ -319,7 +351,7 @@ export function createSuitePanel(ctx: SuiteContext): { element: HTMLElement; ref
     clearInterval(poll);
     suite = undefined;
     summary.hidden = true;
-    void chrome.storage.local.remove(LAST_SUITE_KEY);
+    panelStorage.remove(LAST_SUITE_KEY);
   }
 
   // Reports of the batch's own project and org (or, after a page reload, the current selection).
@@ -341,7 +373,7 @@ export function createSuitePanel(ctx: SuiteContext): { element: HTMLElement; ref
     if (!parsed) void review.resume().then((found) => { if (found) review.element.hidden = false; });
     if (parsed && !suite) return renderReview();
     if (suite) return renderSuite();
-    const saved = await chrome.storage.local.get(LAST_SUITE_KEY).catch(() => ({} as Record<string, unknown>));
+    const saved = await panelStorage.get(LAST_SUITE_KEY);
     const id = saved[LAST_SUITE_KEY] as string | undefined;
     if (!id) return;
     try {
@@ -349,7 +381,7 @@ export function createSuitePanel(ctx: SuiteContext): { element: HTMLElement; ref
       renderSuite();
       if (isActive()) watch();
     } catch {
-      void chrome.storage.local.remove(LAST_SUITE_KEY); // the server restarted and no longer knows it
+      panelStorage.remove(LAST_SUITE_KEY); // the server restarted and no longer knows it
     }
   }
 
@@ -361,7 +393,7 @@ export function createSuitePanel(ctx: SuiteContext): { element: HTMLElement; ref
     showMessage("", "");
     batchScope = scope;
     suite = await send({ type: "getSuite", id });
-    void chrome.storage.local.set({ [LAST_SUITE_KEY]: id });
+    panelStorage.set({ [LAST_SUITE_KEY]: id });
     renderSuite();
     if (isActive()) watch();
   }

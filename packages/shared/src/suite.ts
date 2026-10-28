@@ -53,6 +53,8 @@ export const StartSuiteRequest = z.object({
   project: ProjectName.optional(),
   // Fast execution for every row of the batch.
   fast: z.boolean().optional(),
+  // Run every FAIL or BLOCKED case once more: failing again confirms it, passing marks it flaky.
+  recheck: z.boolean().optional(),
   cases: z.array(z.object({
     tcId: z.string().trim().min(1).max(60),
     title: z.string().max(300),
@@ -79,6 +81,15 @@ export const SuiteItem = z.object({
   verdict: Verdict.optional(),
   bugs: z.array(z.string()),
   error: z.string().optional(),
+  // The automatic re-check of a FAIL/BLOCKED case, and what it showed: "confirmed" (failed again)
+  // or "flaky" (passed the second time). No outcome while it runs, or if it could not run.
+  recheck: z.object({
+    runId: RunId,
+    displayId: DisplayRunId.optional(),
+    status: SuiteItemStatus,
+    verdict: Verdict.optional(),
+  }).optional(),
+  outcome: z.enum(["confirmed", "flaky"]).optional(),
 });
 export type SuiteItem = z.infer<typeof SuiteItem>;
 
@@ -89,7 +100,8 @@ export const SuiteSummary = z.object({
   blocked: z.int(),
   errors: z.int(),
   cancelled: z.int(),
-  pending: z.int(), // queued or running
+  pending: z.int(), // queued or running (a case also counts while its re-check runs)
+  flaky: z.int().default(0), // failed first, passed on re-check
 });
 export type SuiteSummary = z.infer<typeof SuiteSummary>;
 
@@ -103,10 +115,12 @@ export const Suite = z.object({
 });
 export type Suite = z.infer<typeof Suite>;
 
-export function summarizeSuite(items: readonly Pick<SuiteItem, "status" | "verdict">[]): SuiteSummary {
-  const s: SuiteSummary = { total: items.length, passed: 0, failed: 0, blocked: 0, errors: 0, cancelled: 0, pending: 0 };
+export function summarizeSuite(items: readonly Pick<SuiteItem, "status" | "verdict" | "recheck" | "outcome">[]): SuiteSummary {
+  const s: SuiteSummary = { total: items.length, passed: 0, failed: 0, blocked: 0, errors: 0, cancelled: 0, pending: 0, flaky: 0 };
+  const busy = (status?: string) => status === "queued" || status === "running";
   for (const i of items) {
-    if (i.status === "queued" || i.status === "running") s.pending++;
+    if (busy(i.status) || busy(i.recheck?.status)) s.pending++;
+    else if (i.outcome === "flaky") s.flaky++;
     else if (i.status === "cancelled") s.cancelled++;
     else if (i.status === "error") s.errors++;
     else if (i.verdict === "PASS") s.passed++;

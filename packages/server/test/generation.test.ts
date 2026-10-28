@@ -201,6 +201,27 @@ describe("generating test cases from a Jira story", () => {
     assert.ok(existsSync(join(dir, "qa", "test-cases", `${id}_${fileName}`)), "the Excel copy is saved next to the generation, not elsewhere");
   });
 
+  test("earlier stories are listed per org (newest first) and can be deleted", async () => {
+    const bridge = new AgentBridge();
+    const gens = service(bridge, scripted(bridge, [
+      ["criteria", { criteria: [{ id: "AC1", text: "PO Number required" }] }],
+      ["cases", { cases: [kase("Blank PO Number blocks PO Received", ["AC1"])] }],
+    ], []));
+    const { id } = await gens.start(org, { orgId: org.id, story: { key: "RMS-170", text: STORY } });
+    await gens.wait(id);
+    const listed = await gens.list(org.id);
+    assert.ok(listed.length >= 2);
+    assert.deepEqual(listed[0], { id, storyKey: "RMS-170", createdAt: listed[0]!.createdAt, status: "completed", cases: 1 });
+    assert.ok(listed.every((g, i) => i === 0 || g.createdAt <= listed[i - 1]!.createdAt), "newest first");
+    assert.deepEqual(await gens.list("another-org"), []);
+
+    await gens.delete(id);
+    assert.equal(await gens.get(id), undefined);
+    assert.equal(await service(bridge, scripted(bridge, [], [])).get(id), undefined, "gone after a restart too");
+    assert.ok(!(await gens.list(org.id)).some((g) => g.id === id));
+    await assert.rejects(gens.delete(id), /no generation/);
+  });
+
   test("only one generation at a time; a story without test cases is an error", async () => {
     const bridge = new AgentBridge();
     let release!: () => void;

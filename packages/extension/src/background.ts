@@ -72,6 +72,22 @@ async function handle(req: BgRequest): Promise<unknown> {
       return json("/generations", jsonBody(req.request));
     case "getGeneration":
       return json(`/generations/${encodeURIComponent(req.id)}`);
+    case "listGenerations":
+      return json(`/generations?orgId=${encodeURIComponent(req.orgId)}`);
+    case "deleteGeneration":
+      await api(`/generations/${encodeURIComponent(req.id)}`, { method: "DELETE" });
+      return null;
+    case "listTestSets":
+      return json(`/test-sets?orgId=${encodeURIComponent(req.orgId)}${req.project ? `&project=${encodeURIComponent(req.project)}` : ""}`);
+    case "saveTestSet":
+      return json("/test-sets", jsonBody(req.request));
+    case "getTestSet":
+      return json(`/test-sets/${encodeURIComponent(req.id)}`);
+    case "deleteTestSet":
+      await api(`/test-sets/${encodeURIComponent(req.id)}`, { method: "DELETE" });
+      return null;
+    case "runTestSet":
+      return json(`/test-sets/${encodeURIComponent(req.id)}/run`, jsonBody(req.options));
     case "updateCase":
       return json(`/generations/${encodeURIComponent(req.id)}/cases/${encodeURIComponent(req.tcId)}`, { ...jsonBody(req.update), method: "PUT" });
     case "exportCases": {

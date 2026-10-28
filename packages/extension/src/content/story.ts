@@ -1,5 +1,6 @@
 import { CASE_PRIORITIES, CASE_TYPES, type CaseReview, type CaseUpdate, type GeneratedCase, type Generation, type Persona } from "@sfqa/shared";
-import { send } from "../messages.ts";
+import { panelStorage, send } from "../messages.ts";
+import { createSaveSetForm } from "./saveset.ts";
 import { h } from "./dom.ts";
 
 // Paste a Jira story -> Claude writes test cases -> review (approve, reject, edit) -> export to Excel
@@ -34,9 +35,31 @@ export function createStoryPanel(ctx: StoryContext): { element: HTMLElement; ref
   const progress = h("div", { className: "story-progress", hidden: true });
   const results = h("div", { className: "story-results", hidden: true });
 
+  // Earlier stories of this org, a fresh start, and deleting the one shown.
+  const recent = h("select", { className: "story-recent", title: "Open an earlier story" });
+  const newStory = h("button", { className: "btn secondary", type: "button", textContent: "New story" });
+  const deleteStory = h("button", { className: "btn link danger", type: "button", textContent: "Delete story", hidden: true });
+  const storyBar = h("div", { className: "row story-bar" }, recent, newStory, deleteStory);
+  const saveSet = createSaveSetForm(async (name, kind) => {
+    if (!gen) return;
+    const approved = gen.cases.filter((c) => c.review === "Approved");
+    const project = ctx.project();
+    const d = ctx.defaultPersona();
+    const match = (n: string) => ctx.personas().find((p) => p.name.trim().toLowerCase() === n.trim().toLowerCase());
+    const set = await send({
+      type: "saveTestSet",
+      request: {
+        name, kind, orgId: ctx.orgId(), ...(project && { project }), ...(d && { defaultPersonaId: d.id }),
+        cases: approved.map((c) => ({ tcId: c.tcId, title: c.scenario.slice(0, 300), ...(c.module && { module: c.module.slice(0, 80) }), ...(match(c.persona) && { personaId: match(c.persona)!.id }), body: caseText(c) })),
+      },
+    });
+    message.className = "suite-msg ok";
+    message.textContent = `Saved test set "${set.name}" (${set.kind}, ${set.cases.length} cases). Run it from the Test sets tab.`;
+  });
   const element = h("div", { className: "story" },
+    storyBar,
     h("div", { className: "hint", textContent: "Claude analyses the story and writes positive, negative, boundary, validation, permission, data and regression test cases. Nothing runs until you approve cases and click Run." }),
-    keyInput, storyInput, generateButton, message, progress, results,
+    keyInput, storyInput, generateButton, message, progress, results, saveSet.element,
   );
 
   // --- Generating -------------------------------------------------------------------------------------
@@ -54,10 +77,11 @@ export function createStoryPanel(ctx: StoryContext): { element: HTMLElement; ref
     try {
       const project = ctx.project();
       gen = await send({ type: "startGeneration", request: { orgId: ctx.orgId(), ...(project && { project }), story: { ...(keyInput.value.trim() && { key: keyInput.value.trim() }), text } } });
-      void chrome.storage.local.set({ [LAST_GENERATION_KEY]: gen.id });
+      panelStorage.set({ [LAST_GENERATION_KEY]: gen.id });
       openCase = editing = undefined;
       render();
       watch();
+      void loadRecent();
     } catch (err) {
       message.className = "suite-msg err";
       message.textContent = (err as Error).message;
@@ -83,6 +107,8 @@ export function createStoryPanel(ctx: StoryContext): { element: HTMLElement; ref
 
   function render(): void {
     const running = gen?.status === "running";
+    deleteStory.hidden = !gen || running;
+    newStory.disabled = running;
     generateButton.disabled = running;
     generateButton.textContent = running ? "Generating…" : "Generate test cases";
     progress.hidden = !gen || !running;
@@ -157,7 +183,9 @@ export function createStoryPanel(ctx: StoryContext): { element: HTMLElement; ref
     run.onclick = () => void runApproved();
     return h("div", { className: "story-toolbar" },
       h("div", { className: "row" }, filterSelect, approveAll),
-      h("div", { className: "row end" }, exportAll, exportApproved, run),
+      h("div", { className: "row end" }, exportAll, exportApproved,
+        h("button", { className: "btn secondary", type: "button", textContent: "Save approved as test set", disabled: !approved, onclick: () => saveSet.open(approved) }),
+        run),
     );
   }
 
@@ -306,9 +334,67 @@ export function createStoryPanel(ctx: StoryContext): { element: HTMLElement; ref
     }
   }
 
+  // "New story": an empty form and no results. The story shown stays saved (Recent stories).
+  function clearStory(): void {
+    clearInterval(poll);
+    gen = undefined;
+    openCase = editing = undefined;
+    filter = "All";
+    keyInput.value = "";
+    storyInput.value = "";
+    message.textContent = "";
+    saveSet.element.hidden = true;
+    panelStorage.remove(LAST_GENERATION_KEY);
+    render();
+    void loadRecent();
+    storyInput.focus();
+  }
+  newStory.onclick = clearStory;
+
+  deleteStory.onclick = async () => {
+    if (!gen || gen.status === "running") return;
+    if (!confirm(`Delete the generated test cases for ${gen.storyKey}? Excel files you exported are kept.`)) return;
+    try {
+      await send({ type: "deleteGeneration", id: gen.id });
+      clearStory();
+      message.className = "suite-msg ok";
+      message.textContent = "Story deleted.";
+    } catch (err) {
+      message.className = "suite-msg err";
+      message.textContent = (err as Error).message;
+    }
+  };
+
+  recent.onchange = async () => {
+    const id = recent.value;
+    if (!id) return clearStory();
+    try {
+      gen = await send({ type: "getGeneration", id });
+      openCase = editing = undefined;
+      filter = "All";
+      panelStorage.set({ [LAST_GENERATION_KEY]: id });
+      render();
+      if (gen.status === "running") watch();
+    } catch (err) {
+      message.className = "suite-msg err";
+      message.textContent = (err as Error).message;
+    }
+  };
+
+  // The org's earlier stories, newest first; the one shown is selected.
+  async function loadRecent(): Promise<void> {
+    const { generations } = await send({ type: "listGenerations", orgId: ctx.orgId() }).catch(() => ({ generations: [] as { id: string; storyKey: string; createdAt: string; cases: number }[] }));
+    recent.replaceChildren(
+      h("option", { value: "", textContent: generations.length ? `Recent stories (${generations.length})` : "No earlier stories" }),
+      ...generations.map((g) => h("option", { value: g.id, textContent: `${g.storyKey} · ${new Date(g.createdAt).toLocaleDateString()} · ${g.cases} case${g.cases === 1 ? "" : "s"}` })),
+    );
+    recent.value = gen && generations.some((g) => g.id === gen!.id) ? gen.id : "";
+  }
+
   async function refresh(): Promise<void> {
+    void loadRecent();
     if (gen) return render();
-    const saved = await chrome.storage.local.get(LAST_GENERATION_KEY).catch(() => ({} as Record<string, unknown>));
+    const saved = await panelStorage.get(LAST_GENERATION_KEY);
     const id = saved[LAST_GENERATION_KEY] as string | undefined;
     if (!id) return;
     try {
@@ -316,7 +402,7 @@ export function createStoryPanel(ctx: StoryContext): { element: HTMLElement; ref
       render();
       if (gen.status === "running") watch();
     } catch {
-      void chrome.storage.local.remove(LAST_GENERATION_KEY);
+      panelStorage.remove(LAST_GENERATION_KEY);
     }
   }
 

@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { SlugId } from "./ids.ts";
+import { RunId, SlugId } from "./ids.ts";
 
 // A test case as pasted by the user. It is free text; the AI turns it into steps in Phase 2.
 export const TestCase = z.object({
@@ -25,5 +25,7 @@ export const RunRequest = z.object({
   project: ProjectName.optional(),
   // Fast execution for this run (the panel's switch). Absent: the server's FAST_EXECUTION default.
   fast: z.boolean().optional(),
+  // Set on the automatic second run of a case that failed or was blocked in a batch (its first run).
+  recheckOf: RunId.optional(),
 });
 export type RunRequest = z.infer<typeof RunRequest>;

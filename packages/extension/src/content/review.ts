@@ -1,5 +1,5 @@
 import { MAX_REQUIREMENTS_BYTES, REQUIREMENTS_EXTENSIONS, type Review, type SuiteCase } from "@sfqa/shared";
-import { send } from "../messages.ts";
+import { panelStorage, send } from "../messages.ts";
 import { h } from "./dom.ts";
 
 // Optional step in the upload tab: check the selected test cases against a BRD / requirement sheet.
@@ -102,7 +102,7 @@ export function createReviewPanel(ctx: ReviewContext): { element: HTMLElement; u
       return showMessage("err", (err as Error).message);
     }
     showMessage("", "");
-    void chrome.storage.local.set({ [LAST_REVIEW_KEY]: review.id });
+    panelStorage.set({ [LAST_REVIEW_KEY]: review.id });
     render();
     watch();
   }
@@ -182,13 +182,13 @@ export function createReviewPanel(ctx: ReviewContext): { element: HTMLElement; u
       render();
       return true;
     }
-    const saved = await chrome.storage.local.get(LAST_REVIEW_KEY).catch(() => ({} as Record<string, unknown>));
+    const saved = await panelStorage.get(LAST_REVIEW_KEY);
     const id = saved[LAST_REVIEW_KEY] as string | undefined;
     if (!id) return false;
     try {
       review = await send({ type: "getReview", id });
     } catch {
-      void chrome.storage.local.remove(LAST_REVIEW_KEY); // the server restarted and no longer knows it
+      panelStorage.remove(LAST_REVIEW_KEY); // the server restarted and no longer knows it
       return false;
     }
     render();

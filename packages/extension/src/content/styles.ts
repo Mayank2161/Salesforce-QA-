@@ -168,6 +168,28 @@ textarea.case-edit { min-height: 0; font-family: inherit; font-size: 13px; }
 .badge.type-Permission { background: var(--brand); }
 .badge.type-Dataintegrity, .badge.type-Integration, .badge.type-Regression { background: #475569; }
 
+/* Test sets and regression comparison */
+.testsets { display: flex; flex-direction: column; gap: 10px; }
+.testsets > .chip { align-self: flex-start; }
+.set-list { display: flex; flex-direction: column; gap: 8px; }
+.set-card { display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); }
+.set-head { display: flex; align-items: center; gap: 8px; }
+.set-name { flex: 1; min-width: 0; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.set-card .row { justify-content: flex-end; }
+.set-card .row .btn.link.danger { margin-right: auto; margin-left: 0; }
+.badge.kind-Sanity { background: var(--brand); }
+.badge.kind-Regression { background: #475569; }
+.compare { display: flex; flex-direction: column; gap: 8px; border-top: 1px solid var(--border); padding-top: 8px; }
+.set-card .compare-chips { flex-wrap: wrap; gap: 6px; justify-content: flex-start; }
+.crow { display: grid; grid-template-columns: 120px 1fr 64px 64px 104px; gap: 8px; align-items: center; padding: 6px 10px; border-bottom: 1px solid #f1f2f4; font-size: 12px; }
+.crow:last-child { border-bottom: none; }
+.crow.head { position: sticky; top: 0; background: var(--canvas); font-weight: 600; color: var(--muted); }
+.crow > span, .crow > a { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.crow .tc { font-family: Consolas, monospace; font-weight: 600; color: var(--brand); }
+.story-bar { flex-wrap: wrap; }
+.story-recent { flex: 1; min-width: 180px; width: auto; }
+.story-bar .btn.link.danger { margin-left: auto; }
+
 /* Single test | Upload file */
 .tabs { display: flex; gap: 4px; padding: 3px; background: var(--canvas); border: 1px solid var(--border); border-radius: 8px; }
 .tab { flex: 1; font: inherit; font-size: 12.5px; font-weight: 600; padding: 7px 10px; border: none; border-radius: 6px; background: none; color: var(--muted); cursor: pointer; }

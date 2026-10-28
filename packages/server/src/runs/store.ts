@@ -11,6 +11,8 @@ const now = () => new Date().toISOString();
 export class RunStore {
   #runs = new Map<string, Run>();
   #events = new EventEmitter().setMaxListeners(100);
+  // Every finished run, whatever its batch (for re-checks and test set results).
+  #finished = new Set<(run: Run) => void>();
 
   create(request: RunRequest): Run {
     const run: Run = { id: randomUUID(), request, status: "queued", steps: [], bugs: [], createdAt: now() };
@@ -25,6 +27,11 @@ export class RunStore {
 
   list(): Run[] {
     return [...this.#runs.values()].reverse().map((r) => structuredClone(r));
+  }
+
+  onFinished(listener: (run: Run) => void): () => void {
+    this.#finished.add(listener);
+    return () => this.#finished.delete(listener);
   }
 
   subscribe(runId: string, listener: Listener): () => void {
@@ -81,6 +88,13 @@ export class RunStore {
     }
     this.#emit({ type: "run.status", runId: id, status: run.status, at: run.finishedAt });
     this.#emit({ type: "run.completed", runId: id, run: structuredClone(run) });
+    for (const listener of this.#finished) {
+      try {
+        listener(structuredClone(run));
+      } catch {
+        // A listener's failure must not affect the run or other listeners.
+      }
+    }
   }
 
   #require(id: string): Run {

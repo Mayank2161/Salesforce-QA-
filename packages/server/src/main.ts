@@ -8,6 +8,8 @@ import { ProjectStore } from "./projects/store.ts";
 import { openFolder, workspaceRoot } from "./projects/workspace-root.ts";
 import { ReviewService } from "./reviews/service.ts";
 import { GenerationService } from "./generation/service.ts";
+import { SuiteStore } from "./suites/store.ts";
+import { TestSetService } from "./testsets/service.ts";
 import { RunStore } from "./runs/store.ts";
 import { cleanupStaleRuns, createRunner } from "./runs/runner.ts";
 import { SalesforceApiError, adminApi, searchUsers } from "./salesforce/api.ts";
@@ -66,6 +68,9 @@ const runRun = createRunner({
   },
 });
 const generations = new GenerationService({ bridge, claude, serverUrl, storyMcpScript: STORY_MCP_SCRIPT, workDir: RUNS_DIR, qaRoot: QA_DIR, projects });
+// Batches first, then test sets: a failed case's re-check is queued before its set looks for the end.
+const suites = new SuiteStore(store);
+const testSets = new TestSetService({ qaRoot: QA_DIR, projects, suites, runs: store });
 const reviews = new ReviewService({ bridge, qa, claude, serverUrl, reviewMcpScript: REVIEW_MCP_SCRIPT, workDir: RUNS_DIR });
 
 const app = await buildApp({
@@ -76,6 +81,8 @@ const app = await buildApp({
   qa,
   projects,
   generations,
+  suites,
+  testSets,
   openFolder,
   reviews,
   onRunCreated: runRun,

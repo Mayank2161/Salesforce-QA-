@@ -1,4 +1,4 @@
-import { send, type Note, type ProjectSection } from "../messages.ts";
+import { panelStorage, send, type Note, type ProjectSection } from "../messages.ts";
 import { h } from "./dom.ts";
 
 // Project folders: pick (or create) a project. Runs then save their reports in
@@ -80,7 +80,7 @@ export function createProjectsPanel(ctx: ProjectsContext): { element: HTMLElemen
     try {
       const list = await send({ type: "getProjects" });
       root = list.root;
-      const saved = select.value || ((await chrome.storage.local.get(LAST_PROJECT_KEY))[LAST_PROJECT_KEY] as string | undefined);
+      const saved = select.value || ((await panelStorage.get(LAST_PROJECT_KEY))[LAST_PROJECT_KEY] as string | undefined);
       select.replaceChildren(
         h("option", { value: NONE, textContent: "No project (shared reports)" }),
         ...list.projects.map((p) => h("option", { value: p.name, textContent: p.name })),
@@ -130,7 +130,7 @@ export function createProjectsPanel(ctx: ProjectsContext): { element: HTMLElemen
   }
 
   select.onchange = () => {
-    void chrome.storage.local.set({ [LAST_PROJECT_KEY]: select.value });
+    panelStorage.set({ [LAST_PROJECT_KEY]: select.value });
     message.textContent = "";
     void selectOrgFolder();
   };
@@ -155,7 +155,7 @@ export function createProjectsPanel(ctx: ProjectsContext): { element: HTMLElemen
       select.value = "";
       await refresh();
       select.value = created.name;
-      void chrome.storage.local.set({ [LAST_PROJECT_KEY]: created.name });
+      panelStorage.set({ [LAST_PROJECT_KEY]: created.name });
       await selectOrgFolder();
     } catch (err) {
       const m = (err as Error).message;

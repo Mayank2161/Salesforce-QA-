@@ -110,7 +110,7 @@ describe("suite store", () => {
 
     const s = suites.get(id)!;
     assert.deepEqual(s.items.map((i) => [i.tcId, i.status, i.verdict]), [["TC_0", "completed", "PASS"], ["TC_1", "cancelled", undefined], ["TC_2", "cancelled", undefined]]);
-    assert.deepEqual(s.summary, { total: 3, passed: 1, failed: 0, blocked: 0, errors: 0, cancelled: 2, pending: 0 });
+    assert.deepEqual(s.summary, { total: 3, passed: 1, failed: 0, blocked: 0, errors: 0, cancelled: 2, pending: 0, flaky: 0 });
     assert.equal(runs.get(b.id)?.error, CANCELLED);
   });
 });
@@ -164,7 +164,7 @@ describe("suite API", () => {
     assert.deepEqual(suite.items.map((i: { tcId: string; personaId: string; status: string }) => [i.tcId, i.personaId, i.status]), [["TC_008", "sales", "queued"], ["TC_009", "executive", "queued"]]);
     assert.deepEqual(started.map((r) => r.request.testCase.title), ["TC_008 - Fields", "TC_009 - Budget"]);
     assert.ok(started.every((r) => r.request.suiteId === suite.id));
-    assert.deepEqual(suite.summary, { total: 2, passed: 0, failed: 0, blocked: 0, errors: 0, cancelled: 0, pending: 2 });
+    assert.deepEqual(suite.summary, { total: 2, passed: 0, failed: 0, blocked: 0, errors: 0, cancelled: 0, pending: 2, flaky: 0 });
 
     const got = await app.inject({ url: `/suites/${suite.id}`, headers: auth });
     assert.equal(got.json().id, suite.id);

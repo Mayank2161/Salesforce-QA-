@@ -87,6 +87,20 @@ The **Jira story** tab turns a pasted story into test cases. Nothing runs in Sal
 
 Generated cases and exports are saved in `<project>/<org>/Test Cases/`, or in `qa/test-cases/` without a project.
 
+To start over, click **New story**. **Recent stories** reopens an earlier story for the org. **Delete story** removes the shown story's saved test cases; Excel files you exported are kept.
+
+### Sanity and Regression test sets
+
+The **Test sets** tab keeps named sets of test cases per org (and project), run with one click.
+
+- **Create** a set from **Upload file** (**Save as test set** for the selected rows) or from the **Jira story** tab (**Save approved as test set**). Choose **Sanity** (a quick check of the main flows) or **Regression** (the full set, re-run after every change).
+- **Run** starts the set as a normal batch, using the selected persona, project and Fast execution switch. Progress shows in **Upload file**.
+- **Re-check failures once** is on by default for sets and is an option for uploaded files. Every FAIL or BLOCKED case is run once more:
+    - Failing again makes it a **confirmed failure**.
+    - Passing the second time marks it **flaky**. Its bug from the first run stays, for you to review.
+- **Results** compares the latest finished run with the one before: **New failure**, **Still failing**, **Fixed**, **Flaky**, **Passing**, **New**, **Not run**. New failures are listed first, each linked to its report entry.
+- Sets are saved in `<project>/<org>/Test Sets/`, or in `qa/test-sets/<org>/` without a project. The last 20 runs of each set are kept. Deleting a set keeps its runs' reports and screenshots.
+
 ### Fast execution switch
 
 The **Fast execution** switch in the panel applies to the runs you start (single tests, uploaded files and approved Jira cases). **Off** runs exactly as before.
@@ -112,6 +126,7 @@ QA-Workspace/
         Bug Reports/               Bug_Report.html, bug-data.js, one BUG-…/ folder of evidence per bug
         Notes/                     one .md file per note
         Test Cases/                test cases generated from Jira stories, and their Excel exports
+        Test Sets/                 saved Sanity and Regression sets with their run history
       UAT/
         …
   assets/                          shared styles and scripts of the report pages
